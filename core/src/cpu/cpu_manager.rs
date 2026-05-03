@@ -1,4 +1,7 @@
+use log::info;
+
 use crate::cpu::UnicornCPU;
+use crate::mmio::MmioDevice;
 use std::pin::Pin;
 
 pub const CORE_COUNT: usize = 8;
@@ -56,5 +59,45 @@ impl CpuManager {
 
     pub fn get_core(&self, id: usize) -> Option<&UnicornCPU> {
         self.cores.get(id)
+    }
+
+    /// Get a mutable reference to a specific core by ID
+    pub fn get_core_mut(&mut self, id: usize) -> Option<&mut UnicornCPU> {
+        self.cores.get_mut(id)
+    }
+
+    /// Register an MMIO device on all cores' buses.
+    ///
+    /// `factory` is called once per core to produce an independent device instance.
+    /// Each call must return a fresh device — shared state between cores is the
+    /// caller's responsibility.
+    pub fn register_mmio_device<D: MmioDevice + 'static>(
+        &mut self,
+        name: &str,
+        base: u64,
+        size: u64,
+        factory: impl Fn() -> D,
+    ) {
+        for (i, core) in self.cores.iter_mut().enumerate() {
+            let device = factory();
+            core.mmio_bus_mut().register_device(name, base, size, device);
+            info!(
+                "CpuManager: registered MMIO device '{}' at {:#x}..{:#x} on core {}",
+                name, base, base + size, i
+            );
+        }
+    }
+
+    /// Get a read-only handle to a specific core's MMIO bus for inspection.
+    ///
+    /// Returns a `Ref<MmioBus>` guard — deref it to call read-only methods
+    /// like `registered_devices()` or `find_device()`.
+    ///
+    /// Returns `None` if `core_id` is out of range.
+    pub fn mmio_bus(&self, core_id: usize) -> Option<std::cell::Ref<'_, crate::mmio::MmioBus>> {
+        if core_id >= self.cores.len() {
+            return None;
+        }
+        Some(self.cores[core_id].mmio_bus_ref())
     }
 }

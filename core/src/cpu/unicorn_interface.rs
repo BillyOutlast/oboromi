@@ -89,21 +89,52 @@ impl UnicornCPU {
             })
             .ok()?;
 
-        // Map shared memory
+        // Map shared memory in two parts, leaving the MMIO region for mmio_map.
+        // Part 1: 0x0..MMIO_BASE (shared memory before MMIO region)
         unsafe {
-            emu.mem_map_ptr(0x0, memory_size, Prot::ALL, memory_ptr as *mut std::ffi::c_void)
+            emu.mem_map_ptr(0x0, MMIO_BASE, Prot::ALL, memory_ptr as *mut std::ffi::c_void)
                 .map_err(|e| {
-                    eprintln!("Failed to map shared memory for core {}: {:?}", core_id, e);
+                    eprintln!("Failed to map shared memory (low) for core {}: {:?}", core_id, e);
                     e
                 })
                 .ok()?;
         }
 
-        // Register MMIO hooks — skip the mmio_map call for shared memory mode
-        // because the shared memory region may overlap with MMIO_BASE.
-        // Callers using shared memory should manually set up MMIO regions via
-        // the Unicorn mmio_map API or use a higher MMIO_BASE.
-        // The MmioBus is still available for manual device registration via mmio_bus_mut().
+        // MMIO region: mapped via mmio_map with hooks that dispatch to MmioBus
+        emu.mmio_map(
+            MMIO_BASE,
+            MMIO_SIZE,
+            Some(move |uc: &mut Unicorn<'_, Rc<RefCell<MmioBus>>>, offset: u64, size: usize| {
+                let bus = uc.get_data_mut();
+                let addr = MMIO_BASE + offset;
+                bus.borrow().read(addr, size as u32)
+            }),
+            Some(move |uc: &mut Unicorn<'_, Rc<RefCell<MmioBus>>>, offset: u64, size: usize, value: u64| {
+                let bus = uc.get_data_mut();
+                let addr = MMIO_BASE + offset;
+                bus.borrow_mut().write(addr, size as u32, value);
+            }),
+        )
+        .map_err(|e| {
+            eprintln!("Failed to map MMIO region for core {}: {:?}", core_id, e);
+            e
+        })
+        .ok()?;
+
+        // Part 2: MMIO_BASE+MMIO_SIZE..memory_size (shared memory after MMIO region)
+        let mmio_end = MMIO_BASE + MMIO_SIZE;
+        if mmio_end < memory_size {
+            unsafe {
+                let part2_ptr = memory_ptr.add(mmio_end as usize);
+                let part2_size = memory_size - mmio_end;
+                emu.mem_map_ptr(mmio_end, part2_size, Prot::ALL, part2_ptr as *mut std::ffi::c_void)
+                    .map_err(|e| {
+                        eprintln!("Failed to map shared memory (high) for core {}: {:?}", core_id, e);
+                        e
+                    })
+                    .ok()?;
+            }
+        }
 
         // Initialize stack pointer to end of memory, offset by core ID to avoid collision
         // Give each core 1MB of stack space at the top of memory
@@ -301,6 +332,13 @@ impl UnicornCPU {
     /// Panics if the bus is already borrowed (shouldn't happen outside of emulation).
     pub fn mmio_bus_mut(&mut self) -> std::cell::RefMut<'_, MmioBus> {
         self.mmio_bus.borrow_mut()
+    }
+
+    /// Get a shared reference to the MMIO bus for inspection (e.g., listing devices).
+    ///
+    /// Panics if the bus is mutably borrowed (shouldn't happen outside of emulation).
+    pub fn mmio_bus_ref(&self) -> std::cell::Ref<'_, MmioBus> {
+        self.mmio_bus.borrow()
     }
 }
 
