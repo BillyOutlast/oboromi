@@ -1,5 +1,8 @@
 use log::warn;
 
+pub mod gic;
+pub use gic::GicV3;
+
 /// Trait for memory-mapped I/O devices.
 ///
 /// Each device owns a contiguous address range and handles reads/writes
