@@ -4,6 +4,7 @@ use unicorn_engine::{Arch, Mode, Prot, RegisterARM64, Unicorn};
 
 use crate::mmio::MmioBus;
 use super::exception::ExceptionModule;
+use crate::mmio::gic::GicDistributor;
 
 /// Base address for the MMIO region (outside the normal 8MB RAM)
 pub const MMIO_BASE: u64 = 0x10000000;
@@ -23,6 +24,8 @@ pub struct UnicornCPU {
     /// Exception module for ARM64 exception level management (SVC/SMC handling).
     /// Shared with hook closures via Rc.
     exception: Rc<RefCell<ExceptionModule>>,
+    /// Shared GIC distributor reference for IRQ delivery peek.
+    gic_dist: Option<Rc<RefCell<GicDistributor>>>,
     pub core_id: u32,
 }
 
@@ -80,6 +83,7 @@ impl UnicornCPU {
             emu: RefCell::new(emu),
             mmio_bus: bus,
             exception,
+            gic_dist: None,
             core_id: 0,
         })
     }
@@ -158,6 +162,7 @@ impl UnicornCPU {
             emu: RefCell::new(emu),
             mmio_bus: bus,
             exception,
+            gic_dist: None,
             core_id,
         })
     }
@@ -402,6 +407,90 @@ impl UnicornCPU {
     /// Returns the configured vector table base, or 0 if not configured.
     pub fn vector_table(&self, el: u8) -> u64 {
         self.exception.borrow().vector_table_for(self.core_id as usize, el)
+    }
+
+    /// Check for pending IRQs on this core and deliver the highest-priority one.
+    ///
+    /// Returns the IRQ number delivered, or None if no qualifying interrupt.
+    ///
+    /// Delivery sequence:
+    /// 1. Read GICC_IAR via MMIO (triggers acknowledge_irq on GicV3)
+    /// 2. If IAR == 1023 (spurious), return None
+    /// 3. Save current PSTATE to SPSR_EL1
+    /// 4. Save current PC to ELR_EL1
+    /// 5. Set PSTATE.CurrentEL to EL1
+    /// 6. Set PC to VBAR_EL1 + VEC_IRQ_OFFSET (0x480)
+    pub fn deliver_irq(&self) -> Option<u32> {
+        // Read GICC_IAR for this core's redistributor region via MMIO.
+        // IAR address = GIC base + GICR base offset + core_id * GICR_REGION_SIZE
+        //             + GICC sub-region offset + GICC_IAR offset
+        let gicc_iar_addr = MMIO_BASE + 0x10000  // GICR_BASE_OFFSET
+            + (self.core_id as u64) * 0x20000     // GICR_REGION_SIZE
+            + 0x10000                              // GICC sub-region within redistributor
+            + 0x000C;                              // GICC_IAR
+
+        // Read through MMIO bus — triggers acknowledge_irq as a side effect
+        let iar = self.read_u32(gicc_iar_addr);
+
+        if iar == 1023 {
+            log::debug!(
+                "deliver_irq: core {} has no qualifying interrupt (spurious)",
+                self.core_id
+            );
+            return None;
+        }
+
+        let irq_id = iar;
+
+        // Save current state
+        let pc = self.get_pc();
+        let pstate = self.emu.borrow().reg_read(RegisterARM64::PSTATE).unwrap_or(0);
+
+        // Save PSTATE to SPSR_EL1 and PC to ELR_EL1 via exception module
+        let vbar = {
+            let mut exc = self.exception.borrow_mut();
+            exc.write_sys_reg(
+                "SPSR_EL1",
+                self.core_id as usize,
+                pstate,
+                &mut self.emu.borrow_mut(),
+            );
+            exc.write_sys_reg(
+                "ELR_EL1",
+                self.core_id as usize,
+                pc,
+                &mut self.emu.borrow_mut(),
+            );
+            // Update PSTATE.CurrentEL to EL1 (bits [3:2] = 0b01 << 2 = 0x4)
+            exc.write_sys_reg(
+                "PSTATE",
+                self.core_id as usize,
+                (pstate & !0xC) | 0x4,
+                &mut self.emu.borrow_mut(),
+            );
+            exc.read_sys_reg("VBAR_EL1", self.core_id as usize, &self.emu.borrow())
+        };
+
+        if vbar == 0 {
+            log::warn!(
+                "deliver_irq: core {} has no VBAR_EL1 configured",
+                self.core_id
+            );
+            return None;
+        }
+
+        // Jump to IRQ vector
+        let handler_addr = vbar + 0x480;
+        self.set_pc(handler_addr);
+
+        log::info!(
+            "GIC: delivered IRQ {} to core {}, jumping to {:#x}",
+            irq_id,
+            self.core_id,
+            handler_addr
+        );
+
+        Some(irq_id)
     }
 }
 

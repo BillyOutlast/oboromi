@@ -1,8 +1,11 @@
 use log::info;
 
 use crate::cpu::UnicornCPU;
+use crate::mmio::gic::{GicDistributor, GicV3};
 use crate::mmio::MmioDevice;
+use std::cell::RefCell;
 use std::pin::Pin;
+use std::rc::Rc;
 
 pub const CORE_COUNT: usize = 8;
 
@@ -12,11 +15,18 @@ compile_error!("oboromi requires a 64-bit architecture to emulate 12GB of RAM.")
 pub const MEMORY_SIZE: u64 = 12 * 1024 * 1024 * 1024; 
 pub const MEMORY_BASE: u64 = 0x0;
 
+/// GICv3 MMIO base address (within the MMIO region)
+pub const GIC_BASE: u64 = 0x10000000;
+/// GICv3 MMIO region size (4MB)
+pub const GIC_SIZE: u64 = 0x400000;
+
 pub struct CpuManager {
     pub cores: Vec<UnicornCPU>,
     // Pin prevents reallocation from invalidating pointers
     #[allow(dead_code)]
     pub shared_memory: Pin<Box<[u8]>>,
+    /// Shared GIC distributor state for all cores
+    gic_dist: Option<Rc<RefCell<GicDistributor>>>,
 }
 
 impl CpuManager {
@@ -45,6 +55,7 @@ impl CpuManager {
         Self {
             cores,
             shared_memory,
+            gic_dist: None,
         }
     }
 
@@ -99,5 +110,34 @@ impl CpuManager {
             return None;
         }
         Some(self.cores[core_id].mmio_bus_ref())
+    }
+
+    /// Register the GICv3 interrupt controller on all cores.
+    ///
+    /// Creates a shared distributor and gives each core its own GicV3 device
+    /// instance backed by the same distributor state.
+    ///
+    /// Returns a clone of the shared distributor `Rc` for external
+    /// manipulation (e.g., triggering interrupts in tests).
+    pub fn register_gic(&mut self) -> Rc<RefCell<GicDistributor>> {
+        let dist = Rc::new(RefCell::new(GicDistributor::new(self.cores.len())));
+        self.gic_dist = Some(dist.clone());
+
+        let core_count = self.cores.len();
+        for (i, core) in self.cores.iter_mut().enumerate() {
+            let device = GicV3::new_with_shared_dist(core_count, dist.clone());
+            core.mmio_bus_mut().register_device("gicv3", GIC_BASE, GIC_SIZE, device);
+            info!(
+                "CpuManager: registered GICv3 MMIO device at {:#x}..{:#x} on core {}",
+                GIC_BASE, GIC_BASE + GIC_SIZE, i
+            );
+        }
+
+        dist
+    }
+
+    /// Get a reference to the shared GIC distributor, if registered.
+    pub fn gic(&self) -> Option<&Rc<RefCell<GicDistributor>>> {
+        self.gic_dist.as_ref()
     }
 }

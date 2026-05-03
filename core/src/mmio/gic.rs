@@ -1,5 +1,5 @@
 use log::{debug, info, warn};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use super::MmioDevice;
@@ -80,7 +80,7 @@ pub struct GicDistributor {
 }
 
 impl GicDistributor {
-    fn new(core_count: usize) -> Self {
+    pub fn new(core_count: usize) -> Self {
         let mut ipriorityr = [0u8; NUM_INTERRUPTS];
         // Initialize to lowest priority (0xFF) — all interrupts masked by default
         ipriorityr.fill(0xFF);
@@ -238,6 +238,97 @@ impl GicDistributor {
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    // External API methods (accessible via Rc<RefCell<GicDistributor>>)
+    // -----------------------------------------------------------------------
+
+    /// Trigger an SPI interrupt. Sets the pending bit for the given IRQ.
+    /// Only valid for SPIs (irq_id 32..1019).
+    pub fn trigger_interrupt(&mut self, irq_id: u32) {
+        if irq_id < 32 || irq_id >= 1020 {
+            return;
+        }
+        let idx = irq_id as usize;
+        let word = idx / 32;
+        let bit = idx % 32;
+        self.icpendr[word] |= 1 << bit;
+        info!(
+            "GICD: interrupt {} triggered, target mask={:#x}",
+            irq_id, self.itargetsr[idx]
+        );
+    }
+
+    /// Return the full interrupt state for a given SPI IRQ.
+    pub fn interrupt_state(&self, irq_id: u32) -> InterruptState {
+        let idx = irq_id as usize;
+        let word = idx / 32;
+        let bit = idx % 32;
+        InterruptState {
+            irq_id,
+            enabled: (self.isenabler[word] & (1 << bit)) != 0,
+            pending: (self.icpendr[word] & (1 << bit)) != 0,
+            active: (self.iactiver[word] & (1 << bit)) != 0,
+            priority: self.ipriorityr[idx],
+            target: self.itargetsr[idx],
+        }
+    }
+
+    /// Return list of pending interrupt IDs for a core (SPIs only).
+    pub fn pending_irqs(&self, core_id: usize) -> Vec<u32> {
+        let mut pending = Vec::new();
+        for irq in 32u32..1020 {
+            let idx = irq as usize;
+            let word = idx / 32;
+            let bit = idx % 32;
+            if (self.icpendr[word] & (1 << bit)) != 0
+                && (self.itargetsr[idx] & (1 << core_id)) != 0
+            {
+                pending.push(irq);
+            }
+        }
+        pending
+    }
+
+    /// Peek at the best pending IRQ for a core WITHOUT acknowledging it.
+    /// Returns the highest-priority, enabled, non-masked pending IRQ ID,
+    /// or None if no qualifying interrupt exists.
+    ///
+    /// This is a read-only operation — it does NOT set the active bit or
+    /// clear the pending bit. Used by deliver_irq() to determine if an
+    /// IRQ should be delivered before the handler reads IAR.
+    pub fn peek_pending_irq(&self, core_id: usize, pmr: u8) -> Option<u32> {
+        let mut best_irq: Option<u32> = None;
+        let mut best_priority: u8 = 0xFF;
+
+        for irq in 32u32..1020 {
+            let idx = irq as usize;
+            let word = idx / 32;
+            let bit = idx % 32;
+
+            if (self.isenabler[word] & (1 << bit)) == 0 {
+                continue;
+            }
+            if (self.icpendr[word] & (1 << bit)) == 0 {
+                continue;
+            }
+            if (self.itargetsr[idx] & (1 << core_id)) == 0 {
+                continue;
+            }
+
+            let priority = self.ipriorityr[idx];
+            if priority >= pmr {
+                continue;
+            }
+
+            if priority < best_priority {
+                best_priority = priority;
+                best_irq = Some(irq);
+            }
+        }
+
+        best_irq
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,10 +343,10 @@ pub struct GicRedistributor {
     typer: u64,
     /// SGI/PPI interrupt set-enable (1 word covers IRQ 0-31)
     isenabler0: u32,
-    /// SGI/PPI interrupt clear-pending
-    icpendr0: u32,
-    /// SGI/PPI interrupt set-active
-    iactiver0: u32,
+    /// SGI/PPI interrupt clear-pending (Cell for interior mutability during IAR read)
+    icpendr0: Cell<u32>,
+    /// SGI/PPI interrupt set-active (Cell for interior mutability during IAR read)
+    iactiver0: Cell<u32>,
     /// SGI/PPI interrupt group
     #[allow(dead_code)] // Used in future tasks for group routing
     igroup0: u32,
@@ -274,8 +365,8 @@ impl GicRedistributor {
             typer: ((core_id as u64) << 8)
                 | if core_id == 7 { 1 << 4 } else { 0 },
             isenabler0: 0,
-            icpendr0: 0,
-            iactiver0: 0,
+            icpendr0: Cell::new(0),
+            iactiver0: Cell::new(0),
             igroup0: 0,
             ipriorityr,
         }
@@ -286,8 +377,8 @@ impl GicRedistributor {
             GICR_CTLR => self.ctlr as u64,
             GICR_TYPER => self.typer,
             GICR_ISENABLER0 => self.isenabler0 as u64,
-            GICR_ICPENDR0 => self.icpendr0 as u64,
-            GICR_ISACTIVER0 => self.iactiver0 as u64,
+            GICR_ICPENDR0 => self.icpendr0.get() as u64,
+            GICR_ISACTIVER0 => self.iactiver0.get() as u64,
             o if o >= GICR_IPRIORITYR_BASE && o < GICR_IPRIORITYR_BASE + 32 => {
                 let base_idx = (o - GICR_IPRIORITYR_BASE) as usize;
                 let mut val = 0u64;
@@ -329,11 +420,11 @@ impl GicRedistributor {
             }
             GICR_ICPENDR0 => {
                 // W1C semantics
-                self.icpendr0 &= !(value as u32);
+                self.icpendr0.set(self.icpendr0.get() & !(value as u32));
             }
             GICR_ISACTIVER0 => {
                 // W1S semantics
-                self.iactiver0 |= value as u32;
+                self.iactiver0.set(self.iactiver0.get() | (value as u32));
             }
             o if o >= GICR_IPRIORITYR_BASE && o < GICR_IPRIORITYR_BASE + 32 => {
                 let base_idx = (o - GICR_IPRIORITYR_BASE) as usize;
@@ -479,6 +570,28 @@ impl GicV3 {
         }
     }
 
+    /// Create a new GicV3 instance that shares an existing distributor.
+    ///
+    /// Used by CpuManager to give each core its own GicV3 device while
+    /// keeping a single shared distributor state across all cores.
+    pub fn new_with_shared_dist(core_count: usize, dist: Rc<RefCell<GicDistributor>>) -> Self {
+        let mut redis = Vec::with_capacity(core_count);
+        let mut cpuif = Vec::with_capacity(core_count);
+        for i in 0..core_count {
+            redis.push(GicRedistributor::new(i));
+            cpuif.push(GicCpuInterface::new());
+        }
+
+        info!("GICv3: created with shared distributor, {} cores", core_count);
+
+        Self {
+            dist,
+            redis,
+            cpuif,
+            core_count,
+        }
+    }
+
     /// Determine which core owns the given redistributor offset.
     fn core_id_for_offset(&self, offset: u64) -> Option<usize> {
         let redis_offset = offset.saturating_sub(GICR_BASE_OFFSET);
@@ -521,6 +634,12 @@ impl GicV3 {
         if self.is_gicc_offset(offset) {
             // CPU interface read
             let gicc_offset = (offset - GICR_BASE_OFFSET) % GICR_REGION_SIZE - 0x10000;
+
+            // Special handling: reading GICC_IAR triggers acknowledge_irq
+            if gicc_offset == GICC_IAR {
+                return self.acknowledge_irq(core_id) as u64;
+            }
+
             self.cpuif[core_id].read_reg(gicc_offset, size)
         } else {
             // Redistributor read
@@ -561,32 +680,14 @@ impl GicV3 {
     /// Sets the pending bit for the given IRQ and targets CPUs based on ITARGETSR.
     /// Only valid for SPIs (irq_id 32..1020).
     pub fn trigger_interrupt(&self, irq_id: u32) {
-        if irq_id < 32 || irq_id >= 1020 {
-            // SGIs/PPIs and out-of-range IRQs are ignored
-            return;
-        }
-
-        let idx = irq_id as usize;
-        let word = idx / 32;
-        let bit = idx % 32;
-
-        let mut dist = self.dist.borrow_mut();
-
-        // Set pending bit
-        dist.icpendr[word] |= 1 << bit;
-
-        let target_mask = dist.itargetsr[idx];
-        info!(
-            "GIC: interrupt {} triggered, target mask={:#x}",
-            irq_id, target_mask
-        );
+        self.dist.borrow_mut().trigger_interrupt(irq_id);
     }
 
     /// Acknowledge an interrupt for the given core.
     ///
     /// Returns the highest-priority pending+enabled interrupt ID,
     /// or 1023 (spurious) if no qualifying interrupt exists.
-    pub fn acknowledge_irq(&mut self, core_id: usize) -> u32 {
+    pub fn acknowledge_irq(&self, core_id: usize) -> u32 {
         // Phase 1: Find the best candidate IRQ (read-only pass)
         let (best_irq, best_priority) = {
             let dist = self.dist.borrow();
@@ -600,7 +701,8 @@ impl GicV3 {
 
                 for irq in 0u32..32 {
                     let bit = irq as usize;
-                    if (redis.isenabler0 & (1 << bit)) != 0 && (redis.icpendr0 & (1 << bit)) != 0
+                    if (redis.isenabler0 & (1 << bit)) != 0
+                        && (redis.icpendr0.get() & (1 << bit)) != 0
                     {
                         let priority = redis.ipriorityr[bit];
                         if priority < pmr && priority < best_priority {
@@ -648,8 +750,12 @@ impl GicV3 {
                 if irq_id < 32 {
                     // SGI/PPI — update redistributor
                     if core_id < self.core_count {
-                        self.redis[core_id].iactiver0 |= 1 << idx;
-                        self.redis[core_id].icpendr0 &= !(1 << idx);
+                        self.redis[core_id]
+                            .iactiver0
+                            .set(self.redis[core_id].iactiver0.get() | (1 << idx));
+                        self.redis[core_id]
+                            .icpendr0
+                            .set(self.redis[core_id].icpendr0.get() & !(1 << idx));
                     }
                 } else {
                     // SPI — update distributor
@@ -677,7 +783,7 @@ impl GicV3 {
     }
 
     /// Complete (deactivate) an interrupt for the given core.
-    pub fn complete_irq(&mut self, core_id: usize, irq_id: u32) {
+    pub fn complete_irq(&self, core_id: usize, irq_id: u32) {
         if irq_id >= 1020 {
             // Invalid or spurious IRQ
             return;
@@ -688,7 +794,9 @@ impl GicV3 {
         if irq_id < 32 {
             // SGI/PPI — update redistributor
             if core_id < self.core_count {
-                self.redis[core_id].iactiver0 &= !(1 << idx);
+                self.redis[core_id]
+                    .iactiver0
+                    .set(self.redis[core_id].iactiver0.get() & !(1 << idx));
                 info!("GIC: core {} completed IRQ {}", core_id, irq_id);
             }
         } else {
@@ -721,7 +829,7 @@ impl GicV3 {
         if core_id < self.core_count {
             let redis = &self.redis[core_id];
             for irq in 0u32..32 {
-                if (redis.icpendr0 & (1 << irq)) != 0 {
+                if (redis.icpendr0.get() & (1 << irq)) != 0 {
                     pending.push(irq);
                 }
             }
@@ -751,7 +859,7 @@ impl GicV3 {
         if core_id < self.core_count {
             let redis = &self.redis[core_id];
             for irq in 0u32..32 {
-                if (redis.iactiver0 & (1 << irq)) != 0 {
+                if (redis.iactiver0.get() & (1 << irq)) != 0 {
                     active.push(irq);
                 }
             }
@@ -781,8 +889,8 @@ impl GicV3 {
             InterruptState {
                 irq_id,
                 enabled: (redis.isenabler0 & (1 << idx)) != 0,
-                pending: (redis.icpendr0 & (1 << idx)) != 0,
-                active: (redis.iactiver0 & (1 << idx)) != 0,
+                pending: (redis.icpendr0.get() & (1 << idx)) != 0,
+                active: (redis.iactiver0.get() & (1 << idx)) != 0,
                 priority: redis.ipriorityr[idx],
                 target: 0xFF, // PPIs target all cores
             }
