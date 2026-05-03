@@ -16,6 +16,11 @@ mod tests {
         0xD4200000 | ((imm16 as u32) << 5)
     }
 
+    /// ERET instruction encoding (Exception Return)
+    fn eret() -> u32 {
+        0xD69F03E0
+    }
+
     const TEST_BASE: u64 = 0x1000;
 
     /// Write a sequence of instructions starting at TEST_BASE and set PC there
@@ -290,5 +295,234 @@ mod tests {
         let pstate = cpu.read_sys_reg("PSTATE");
         let pstate_el = (pstate >> 2) & 0x3;
         assert_eq!(pstate_el, EL1 as u64, "PSTATE.CurrentEL should be EL1 after SVC");
+    }
+
+    // --- T02: Vector table, ERET, and system register hook tests ---
+
+    #[test]
+    fn test_svc_jumps_to_vector_table() {
+        let cpu = UnicornCPU::new().expect("Failed to create CPU");
+
+        // Configure VBAR_EL1 within mapped memory (8MB = 0x0..0x800000)
+        cpu.write_sys_reg("VBAR_EL1", 0x100000);
+
+        // Write a BRK at the handler address (VBAR + 0x400 = 0x100400)
+        // so execution stops cleanly there
+        cpu.write_u32(0x100400, brk(0));
+
+        // Set EL0 and trigger SVC
+        cpu.set_el(EL0);
+
+        // SVC at TEST_BASE, followed by BRK fallback
+        write_program(&cpu, &[svc(0), brk(99)]);
+
+        // Run — SVC should jump to 0x100400 and hit BRK there
+        let result = cpu.run();
+        assert_eq!(result, 1, "Execution should succeed");
+
+        // PC should have jumped to VBAR_EL1 + 0x400 = 0x100400
+        let pc = cpu.get_pc();
+        assert_eq!(
+            pc, 0x100400,
+            "After SVC, PC should be at VBAR_EL1 + synchronous offset"
+        );
+
+        // EL should be EL1
+        assert_eq!(cpu.current_el(), EL1, "EL should be EL1 after SVC");
+    }
+
+    #[test]
+    fn test_smc_jumps_to_vector_table() {
+        let cpu = UnicornCPU::new().expect("Failed to create CPU");
+
+        // Configure VBAR_EL3 within mapped memory
+        cpu.write_sys_reg("VBAR_EL3", 0x200000);
+
+        // Write a BRK at the handler address (VBAR + 0x400 = 0x200400)
+        cpu.write_u32(0x200400, brk(0));
+
+        // Set EL0 and trigger SMC
+        cpu.set_el(EL0);
+
+        write_program(&cpu, &[smc(0), brk(99)]);
+
+        let result = cpu.run();
+        assert_eq!(result, 1, "Execution should succeed");
+
+        // PC should have jumped to VBAR_EL3 + 0x400 = 0x200400
+        let pc = cpu.get_pc();
+        assert_eq!(
+            pc, 0x200400,
+            "After SMC, PC should be at VBAR_EL3 + synchronous offset"
+        );
+
+        assert_eq!(cpu.current_el(), EL3, "EL should be EL3 after SMC");
+    }
+
+    #[test]
+    fn test_eret_restores_el_and_pc() {
+        let cpu = UnicornCPU::new().expect("Failed to create CPU");
+
+        // Set up exception state: simulate having entered EL1 via SVC
+        cpu.set_el(EL1);
+
+        // Set ELR_EL1 to a return address (where we want to go back)
+        let return_addr: u64 = 0x2000;
+        cpu.write_sys_reg("ELR_EL1", return_addr);
+
+        // Set SPSR_EL1 to a PSTATE with EL0 in bits [3:2]
+        // EL0 = 0b00 << 2 = 0x0
+        cpu.write_sys_reg("SPSR_EL1", 0x0);
+
+        // Write ERET at TEST_BASE, followed by BRK fallback
+        write_program(&cpu, &[eret(), brk(99)]);
+
+        let result = cpu.run();
+        assert_eq!(result, 1, "Execution should succeed");
+
+        // After ERET, PC should be at return_addr
+        let pc = cpu.get_pc();
+        assert_eq!(pc, return_addr, "ERET should restore PC from ELR_EL1");
+
+        // EL should be EL0 (from SPSR)
+        assert_eq!(cpu.current_el(), EL0, "ERET should restore EL from SPSR_EL1");
+    }
+
+    #[test]
+    fn test_eret_from_el3_restores_el1() {
+        let cpu = UnicornCPU::new().expect("Failed to create CPU");
+
+        // Simulate being at EL3 after SMC from EL1
+        cpu.set_el(EL3);
+
+        // Set ELR_EL3 to return address
+        let return_addr: u64 = 0x3000;
+        cpu.write_sys_reg("ELR_EL3", return_addr);
+
+        // Set SPSR_EL3 to have EL1 in bits [3:2] (0b01 << 2 = 0x4)
+        cpu.write_sys_reg("SPSR_EL3", 0x4);
+
+        write_program(&cpu, &[eret(), brk(99)]);
+        cpu.run();
+
+        assert_eq!(cpu.get_pc(), return_addr, "ERET should restore PC from ELR_EL3");
+        assert_eq!(cpu.current_el(), EL1, "ERET from EL3 should restore EL1");
+    }
+
+    #[test]
+    fn test_vector_table_method() {
+        let cpu = UnicornCPU::new().expect("Failed to create CPU");
+
+        // Default VBAR should be 0
+        assert_eq!(cpu.vector_table(EL1), 0, "Default VBAR_EL1 should be 0");
+        assert_eq!(cpu.vector_table(EL3), 0, "Default VBAR_EL3 should be 0");
+
+        // Configure VBARs within mapped memory
+        cpu.write_sys_reg("VBAR_EL1", 0x100000);
+        cpu.write_sys_reg("VBAR_EL3", 0x200000);
+
+        assert_eq!(cpu.vector_table(EL1), 0x100000, "VBAR_EL1 should be readable via vector_table()");
+        assert_eq!(cpu.vector_table(EL3), 0x200000, "VBAR_EL3 should be readable via vector_table()");
+    }
+
+    #[test]
+    fn test_full_round_trip_svc_with_eret() {
+        // Full round-trip: EL0 → SVC → handler at EL1 → ERET → back to EL0
+        // Both SVC and ERET execute in a single cpu.run() call
+        let cpu = UnicornCPU::new().expect("Failed to create CPU");
+
+        // Set up vector table within mapped memory
+        let vbar_el1: u64 = 0x100000;
+        cpu.write_sys_reg("VBAR_EL1", vbar_el1);
+
+        // Write handler code at VBAR_EL1 + 0x400 = 0x100400:
+        //   handler: ERET (returns immediately)
+        let handler_addr = vbar_el1 + 0x400;
+        cpu.write_u32(handler_addr, eret());
+
+        // Set up main program at TEST_BASE:
+        //   SVC #0 (will jump to handler, ERET returns to TEST_BASE+4)
+        //   BRK #1 (landing pad — ERET returns here, BRK stops emulation)
+        cpu.set_el(EL0);
+
+        write_program(&cpu, &[svc(0), brk(1)]);
+
+        // Single run: SVC → jump to handler → ERET → return to TEST_BASE+4
+        let result = cpu.run();
+        assert_eq!(result, 1, "Round-trip should succeed");
+
+        // After round-trip, we should be back at EL0
+        assert_eq!(cpu.current_el(), EL0, "After round-trip, EL should be EL0");
+
+        // PC should be at TEST_BASE + 4 (where ERET returned)
+        assert_eq!(cpu.get_pc(), TEST_BASE + 4, "After round-trip, PC should be at TEST_BASE + 4");
+
+        // Verify SPSR was used correctly (it was restored, so current PSTATE should have EL0)
+        let pstate = cpu.read_sys_reg("PSTATE");
+        assert_eq!(pstate & 0xC, 0, "PSTATE.CurrentEL should be EL0 after round-trip");
+    }
+
+    #[test]
+    fn test_smc_round_trip_with_eret() {
+        // Full round-trip: EL0 → SMC → handler at EL3 → ERET → back to EL0
+        let cpu = UnicornCPU::new().expect("Failed to create CPU");
+
+        // Set up vector table within mapped memory
+        let vbar_el3: u64 = 0x200000;
+        cpu.write_sys_reg("VBAR_EL3", vbar_el3);
+
+        // Write handler at VBAR_EL3 + 0x400 = 0x200400: ERET
+        let handler_addr = vbar_el3 + 0x400;
+        cpu.write_u32(handler_addr, eret());
+
+        // Set EL0, trigger SMC
+        cpu.set_el(EL0);
+
+        write_program(&cpu, &[smc(0), brk(1)]);
+
+        // Single run: SMC → handler → ERET → return
+        let result = cpu.run();
+        assert_eq!(result, 1, "SMC round-trip should succeed");
+
+        // After round-trip, back at EL0
+        assert_eq!(cpu.current_el(), EL0, "After SMC round-trip, EL should be EL0");
+        assert_eq!(cpu.get_pc(), TEST_BASE + 4, "After SMC round-trip, PC should return past SMC");
+    }
+
+    #[test]
+    fn test_svc_without_vbar_stops() {
+        // When no VBAR is configured (default 0), SVC should stop emulation
+        // without jumping — backward compatible behavior
+        let cpu = UnicornCPU::new().expect("Failed to create CPU");
+
+        cpu.set_el(EL0);
+
+        write_program(&cpu, &[svc(0), brk(99)]);
+        cpu.run();
+
+        // Should still transition to EL1
+        assert_eq!(cpu.current_el(), EL1, "SVC without VBAR should still transition to EL1");
+
+        // PC should still be set (not at 0x400 which would be invalid)
+        let pc = cpu.get_pc();
+        // With no VBAR configured, vbar=0, handler_addr = 0 + 0x400 = 0x400
+        // But since vbar==0 AND handler_addr==0x400, the condition is true
+        // and it falls through to the "no vector table — stopping" path
+        // PC stays at the SVC address (emu_stop doesn't change PC)
+        assert_eq!(pc, TEST_BASE, "PC should remain at SVC instruction address when no VBAR");
+    }
+
+    #[test]
+    fn test_current_el_readonly_via_msr() {
+        // CurrentEL is read-only; writes via the string API are silently ignored
+        let cpu = UnicornCPU::new().expect("Failed to create CPU");
+
+        let original = cpu.read_sys_reg("CurrentEL");
+        assert_eq!(original, (EL1 as u64) << 2, "Initial CurrentEL should be EL1 << 2");
+
+        // Try to write — should be ignored
+        cpu.write_sys_reg("CurrentEL", 0xFF);
+        let after = cpu.read_sys_reg("CurrentEL");
+        assert_eq!(after, original, "CurrentEL should be unchanged after write attempt");
     }
 }

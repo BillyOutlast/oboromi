@@ -397,6 +397,12 @@ impl UnicornCPU {
         let mut exc = self.exception.borrow_mut();
         exc.write_sys_reg(reg, self.core_id as usize, value, &mut self.emu.borrow_mut());
     }
+
+    /// Get the vector base address (VBAR_ELx) for the given exception level.
+    /// Returns the configured vector table base, or 0 if not configured.
+    pub fn vector_table(&self, el: u8) -> u64 {
+        self.exception.borrow().vector_table_for(self.core_id as usize, el)
+    }
 }
 
 // remove Clone - sharing a CPU via clone is misleading
