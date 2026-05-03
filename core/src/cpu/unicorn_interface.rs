@@ -3,6 +3,7 @@ use std::rc::Rc;
 use unicorn_engine::{Arch, Mode, Prot, RegisterARM64, Unicorn};
 
 use crate::mmio::MmioBus;
+use super::exception::ExceptionModule;
 
 /// Base address for the MMIO region (outside the normal 8MB RAM)
 pub const MMIO_BASE: u64 = 0x10000000;
@@ -19,6 +20,9 @@ pub struct UnicornCPU {
     /// The bus lives behind an Rc so the constructor can hand clones to the
     /// MMIO callbacks *and* keep one for the external `mmio_bus_mut()` API.
     mmio_bus: Rc<RefCell<MmioBus>>,
+    /// Exception module for ARM64 exception level management (SVC/SMC handling).
+    /// Shared with hook closures via Rc.
+    exception: Rc<RefCell<ExceptionModule>>,
     pub core_id: u32,
 }
 
@@ -68,9 +72,14 @@ impl UnicornCPU {
         // Initialize stack pointer
         let _ = emu.reg_write(RegisterARM64::SP, (8 * 1024 * 1024) - 0x1000);
 
+        // Create exception module and register SVC/SMC hooks
+        let exception = Rc::new(RefCell::new(ExceptionModule::new()));
+        ExceptionModule::register_hooks(&mut emu, exception.clone(), 0);
+
         Some(Self {
             emu: RefCell::new(emu),
             mmio_bus: bus,
+            exception,
             core_id: 0,
         })
     }
@@ -141,9 +150,14 @@ impl UnicornCPU {
         let stack_top = memory_size - (core_id as u64 * 0x100000);
         let _ = emu.reg_write(RegisterARM64::SP, stack_top);
 
+        // Create exception module and register SVC/SMC hooks
+        let exception = Rc::new(RefCell::new(ExceptionModule::new()));
+        ExceptionModule::register_hooks(&mut emu, exception.clone(), core_id);
+
         Some(Self {
             emu: RefCell::new(emu),
             mmio_bus: bus,
+            exception,
             core_id,
         })
     }
@@ -339,6 +353,49 @@ impl UnicornCPU {
     /// Panics if the bus is mutably borrowed (shouldn't happen outside of emulation).
     pub fn mmio_bus_ref(&self) -> std::cell::Ref<'_, MmioBus> {
         self.mmio_bus.borrow()
+    }
+
+    /// Get a shared reference to the ExceptionModule.
+    ///
+    /// Use this to inspect exception level state (current EL, SPSR, etc.).
+    pub fn exception_ref(&self) -> std::cell::Ref<'_, ExceptionModule> {
+        self.exception.borrow()
+    }
+
+    /// Get a mutable reference to the ExceptionModule.
+    ///
+    /// Use this to modify exception level state or write system registers
+    /// through the ExceptionModule API.
+    pub fn exception_mut(&self) -> std::cell::RefMut<'_, ExceptionModule> {
+        self.exception.borrow_mut()
+    }
+
+    /// Get the current exception level for this core.
+    pub fn current_el(&self) -> u8 {
+        self.exception.borrow().current_el(self.core_id as usize)
+    }
+
+    /// Set the exception level for this core.
+    /// Updates both software tracking and PSTATE.CurrentEL in the emulator.
+    pub fn set_el(&self, el: u8) {
+        let mut exc = self.exception.borrow_mut();
+        exc.set_current_el(self.core_id as usize, el, &mut self.emu.borrow_mut());
+    }
+
+    /// Read a system register through the ExceptionModule API.
+    /// Supports: CurrentEL, DAIF, VBAR_EL1, VBAR_EL3, SPSR_EL1, SPSR_EL3,
+    /// ELR_EL1, ELR_EL3, PSTATE.
+    pub fn read_sys_reg(&self, reg: &str) -> u64 {
+        let exc = self.exception.borrow();
+        exc.read_sys_reg(reg, self.core_id as usize, &self.emu.borrow())
+    }
+
+    /// Write a system register through the ExceptionModule API.
+    /// Supports: DAIF, VBAR_EL1, VBAR_EL3, SPSR_EL1, SPSR_EL3,
+    /// ELR_EL1, ELR_EL3, PSTATE.
+    pub fn write_sys_reg(&self, reg: &str, value: u64) {
+        let mut exc = self.exception.borrow_mut();
+        exc.write_sys_reg(reg, self.core_id as usize, value, &mut self.emu.borrow_mut());
     }
 }
 
