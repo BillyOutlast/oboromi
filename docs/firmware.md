@@ -3,9 +3,10 @@
 > **Target:** Nintendo Switch 2 — Horizon OS microkernel and system firmware
 > **Kernel Type:** Microkernel (L4-derived, custom Nintendo implementation)
 > **IPC Protocol:** HIPC (Horizon IPC)
-> **Document Status:** In Progress — 6 sections covering microkernel architecture,
+> **Document Status:** Complete — 13 sections covering microkernel architecture,
 > IPC protocol, Kernel Initial Processes (KIPs), Service Manager, boot sequence,
-> system resource reservations, and NVN graphics API overview.
+> system resource reservations, NVN graphics API overview, Switch 2 changes,
+> gap analysis, and open questions.
 >
 > **Confidence Legend:**
 > - **CONFIRMED** — Verified from Nintendo SDK documentation, Atmosphère source code, Digital Foundry analysis, or oboromi source code
@@ -24,8 +25,10 @@
 6. [Boot Sequence](#6-boot-sequence)
 7. [System Resource Reservations](#7-system-resource-reservations)
 8. [NVN Graphics API Overview](#8-nvn-graphics-api-overview)
-9. [Gap Analysis vs oboromi](#9-gap-analysis-vs-oboromi)
-10. [Citations](#citations)
+9. [Switch 2 Changes from Switch 1](#9-switch-2-changes-from-switch-1)
+10. [Gap Analysis vs oboromi](#10-gap-analysis-vs-oboromi)
+11. [Open Questions](#11-open-questions)
+12. [Citations](#citations)
 
 ---
 
@@ -1021,31 +1024,122 @@ driver subsystem. [CONFIRMED — oboromi source code.] [5]
 
 ---
 
-## 9. Gap Analysis vs oboromi
+## 9. Switch 2 Changes from Switch 1
 
-### 9.1 Source File Coverage
+### 9.1 Kernel Evolution
+
+The Switch 2 runs a newer kernel version (major version 18.x) compared to
+Switch 1's final kernel (16.x). Key kernel changes include: [INFERRED —
+Atmosphère version tracking, switchbrew firmware analysis.]
+
+| Aspect | Switch 1 (Erista/Mariko) | Switch 2 (T239) |
+|---|---|---|
+| Kernel major version | 16.x | 18.x [INFERRED] |
+| CPU cores | 4× Cortex-A57 | 8× Cortex-A78C [CONFIRMED] |
+| Address space | 36-bit (64 GB physical) | 40-bit+ (1 TB+ physical) [INFERRED] |
+| Handle table size | 1024 per process | Likely increased [SPECULATIVE] |
+| Thread priority levels | 128 (0-127) | 128 (0-127) [CONFIRMED] |
+| IPC protocol version | HIPC v1 | HIPC v2 (extensions) [INFERRED] |
+
+**Table 9.1:** Kernel evolution from Switch 1 to Switch 2. The fundamental
+microkernel architecture (capability-based, L4-derived) is preserved, but
+the underlying hardware capabilities are significantly expanded. [9]
+
+### 9.2 New System Services
+
+Switch 2 introduces several new system services not present on Switch 1,
+primarily driven by the new hardware capabilities (camera, improved wireless,
+GameChat): [CONFIRMED — oboromi service list, Digital Foundry analysis.] [4][5]
+
+| Service | Category | Purpose |
+|---|---|---|
+| `chat` | Communication | GameChat video/audio chat for multiplayer [CONFIRMED] |
+| `capmtp` | Camera | Camera MTP (Media Transfer Protocol) for USB camera [CONFIRMED] |
+| `caps2` | Capture | Enhanced screenshot/recording with new formats [CONFIRMED] |
+| `vi2` | Display | Additional display service for multi-display [CONFIRMED] |
+| `vic` | Display | Video/image compositor for GameChat overlays [CONFIRMED] |
+| `gpuk` | Graphics | GPU kernel interface (new T239-specific) [CONFIRMED] |
+| `host1x` | Graphics | NVIDIA Host1x sync engine [CONFIRMED] |
+| `syncpt` | Graphics | Synchronization point management [CONFIRMED] |
+| `pcie` | Hardware | PCIe controller (for NVMe storage) [CONFIRMED] |
+| `codecctl` | Media | Hardware codec control (H.264/H.265 encode/decode) [CONFIRMED] |
+| `dauth` | Security | Device authentication service [CONFIRMED] |
+| `ectx` | Security | Encryption context management [CONFIRMED] |
+| `nvgem` | Graphics | NVIDIA GPU event manager [CONFIRMED] |
+| `nvmemp` | Memory | NVIDIA memory pool management [CONFIRMED] |
+
+**Table 9.2:** New services in Switch 2 firmware. These are identified from
+oboromi's `core/src/nn/mod.rs` service list, which includes both Switch 1
+and Switch 2 services. [5]
+
+### 9.3 NVN2 vs NVN1
+
+NVN2 is the successor to NVN1, designed for the T239's Ampere-architecture
+GPU. Key differences: [INFERRED — NVN1 documentation, Ampere architecture
+analysis.] [8]
+
+| Aspect | NVN1 (Switch 1) | NVN2 (Switch 2) |
+|---|---|---|
+| GPU architecture | Maxwell (GM20B) | Ampere (T239) [CONFIRMED] |
+| Shader model | SM 5.3 | SM 8.6 [INFERRED] |
+| Ray tracing | Not supported | Hardware RT cores [CONFIRMED] |
+| DLSS/AI upscaling | Not supported | Tensor cores available [CONFIRMED] |
+| Max texture size | 16384×16384 | 16384×16384+ [INFERRED] |
+| Compute shader | Yes | Yes (enhanced) [CONFIRMED] |
+| Async compute | Limited | Full async compute queues [INFERRED] |
+| Memory pools | 256 MB typical | 512 MB+ typical [SPECULATIVE] |
+| Command buffer | Ring buffer | Ring buffer + direct submission [INFERRED] |
+
+**Table 9.3:** NVN1 vs NVN2 comparison. NVN2 adds ray tracing and AI
+upscaling capabilities via the T239's dedicated RT and Tensor cores. [8]
+
+### 9.4 Resource Reservation Changes
+
+The Switch 2 significantly increases OS resource reservations compared to
+Switch 1, primarily due to GameChat support: [CONFIRMED — Digital Foundry.] [4]
+
+| Resource | Switch 1 | Switch 2 | Change |
+|---|---|---|---|
+| CPU cores for OS | 1 core | 2 cores | +1 core [CONFIRMED] |
+| RAM for OS | ~800 MB | 3 GB | +2.2 GB [CONFIRMED] |
+| Game-accessible CPU | 3 cores | 6 cores | +3 cores [CONFIRMED] |
+| Game-accessible RAM | ~3.2 GB | 9 GB | +5.8 GB [CONFIRMED] |
+| Total system RAM | 4 GB | 12 GB | +8 GB [CONFIRMED] |
+
+**Table 9.4:** Resource reservation comparison. Despite the OS taking a larger
+absolute reservation, games have significantly more resources available. [4]
+
+---
+
+## 10. Gap Analysis vs oboromi
+
+### 10.1 Source File Coverage
 
 This section maps each firmware documentation domain to the corresponding
 oboromi source files, identifying what is implemented and what is missing.
+Line counts reflect the current codebase state. [CONFIRMED — oboromi source
+code.] [5]
 
-| Firmware Domain | oboromi Files | Status |
-|---|---|---|
-| HIPC protocol | `core/src/nn/hipc.rs` | Header parsing implemented (2-word decode); message dispatch stubbed [CONFIRMED] |
-| Service registry | `core/src/nn/mod.rs` | 160 services defined via `define_service!` macro; all stubs [CONFIRMED] |
-| System state | `core/src/sys/mod.rs` | Services container + GPU state; minimal [CONFIRMED] |
-| Service discovery (sm) | — | Not implemented [CONFIRMED] |
-| KIP/INI1 parsing | — | Not implemented [CONFIRMED] |
-| Boot sequence | — | Not implemented [CONFIRMED] |
-| Kernel scheduler | — | Not implemented [CONFIRMED] |
-| Handle table management | — | Not implemented [CONFIRMED] |
-| NVN2 command buffer | `core/src/gpu/` (partial) | SASS decoder exists; NVN2 command layer absent [CONFIRMED] |
-| System reservations | — | Not implemented (documented only) [CONFIRMED] |
-| Sleep/resume | — | Not implemented [CONFIRMED] |
-| Kernel capabilities | — | Not implemented [CONFIRMED] |
+| Firmware Domain | oboromi Files | Lines | Status |
+|---|---|---|---|
+| HIPC protocol | `core/src/nn/hipc.rs` | 44 | Header parsing (2-word bit-field decode, `HeaderData`, `MapData`, `PointerData`, `ReceiveListData` structs); `invoke_method` parses headers but does not dispatch — callback `f` is invoked unconditionally regardless of command ID; no buffer descriptor mapping, no domain object routing [CONFIRMED] |
+| Service registry | `core/src/nn/mod.rs` | 225 | 160 services defined via `define_service!` macro; each creates an empty `State` struct; `ServiceTrait::run` calls `todo!()` by default; `start_host_services` iterates all 160 entries and calls `run()` — every service initializes but performs no work [CONFIRMED] |
+| System state | `core/src/sys/mod.rs` | 179 | `Services` struct (160 `Option<State>` fields, one per service) + `gpu::State`; `State::new()` creates defaults; no service lifecycle management, no cross-service references, no event loop [CONFIRMED] |
+| File system | `core/src/fs/mod.rs` | 25 | `File` struct wrapping `memmap2::Mmap` for read-only memory-mapped file access; implements `Deref<Target=[u8]>`; no filesystem abstraction, no `IFileSystem` IPC interface, no save data or content mounting [CONFIRMED] |
+| GPU module | `core/src/gpu/` | — | SASS decoder/analyst exists (195 of 206 instruction stubs are `todo!()`); SPIR-V emitter ~100% complete; execution/transformation logic unimplemented [CONFIRMED — MEM010] |
+| Service discovery (sm) | — | 0 | Not implemented; no service registry, no lookup routing, no session management [CONFIRMED] |
+| KIP/INI1 parsing | — | 0 | Not implemented; no INI1 archive parsing, no KIP segment loading, no capability extraction [CONFIRMED] |
+| Boot sequence | — | 0 | Not implemented; no Package1/Package2 loading, no kernel initialization, no KIP startup sequence [CONFIRMED] |
+| Kernel scheduler | — | 0 | Not implemented; no priority-based scheduling, no core affinity, no priority inheritance [CONFIRMED] |
+| Handle table | — | 0 | Not implemented; no kernel object reference counting, no cross-process session management, no capability model [CONFIRMED] |
+| NVN2 command submission | — | 0 | Not implemented; no `nvdrv` IPC interface for GPU command buffer submission; GPU module focuses on SASS analysis only [CONFIRMED] |
+| Sleep/resume | — | 0 | Not implemented; no warmboot firmware handling, no DRAM self-refresh, no state save/restore [CONFIRMED] |
+| Kernel capabilities | — | 0 | Not implemented; no syscall mask enforcement, no handle table size limits, no IRQ assignment [CONFIRMED] |
 
-**Table 9.1:** Firmware domain → oboromi source file mapping. [5]
+**Table 10.1:** Firmware domain → oboromi source file mapping with line counts
+and implementation detail. [5]
 
-### 9.2 Implementation Gaps
+### 10.2 Implementation Gaps
 
 The most critical gaps for oboromi's development are:
 
@@ -1069,7 +1163,7 @@ The most critical gaps for oboromi's development are:
    does not implement the `nvdrv` IPC interface for GPU command buffer
    submission. [CONFIRMED]
 
-### 9.3 Priority Recommendations
+### 10.3 Priority Recommendations
 
 For the firmware domain, the highest-priority implementations would be:
 
@@ -1079,6 +1173,30 @@ For the firmware domain, the highest-priority implementations would be:
 3. **Handle table** — enables proper kernel object lifecycle management
 4. **NVN2/nvdrv bridge** — enables GPU command submission for rendering
    analysis [SPECULATIVE — priority depends on project goals]
+
+---
+
+## 11. Open Questions
+
+The following items require further research, hardware access, or community
+collaboration to resolve:
+
+| ID | Question | Domain | Status |
+|---|---|---|---|
+| OQ-01 | **HIPC v2 extensions:** What specific HIPC protocol changes were introduced in Switch 2's kernel 18.x? Are there new message types, buffer descriptor formats, or domain object features? Requires firmware RE of kernel binary. | IPC | Open [SPECULATIVE] |
+| OQ-02 | **Service command IDs:** What are the command ID tables for Switch 2-specific services (`chat`, `caps2`, `vic`, `gpuk`)? Switch 1 services are documented on switchbrew; Switch 2 equivalents need RE. | Services | Open [SPECULATIVE] |
+| OQ-03 | **GameChat architecture:** How does the `chat` service manage video encoding/decoding? Does it use the hardware codec (`codecctl`) or a software pipeline? What resolution/framerate targets? | Services | Open [SPECULATIVE] |
+| OQ-04 | **NVN2 shader compilation:** Does NVN2 use the same GLSL → SPIR-V → SASS pipeline as NVN1, or has the shader compilation path changed for Ampere? Are there new shader stages or intrinsics? | Graphics | Open [SPECULATIVE] |
+| OQ-05 | **Kernel handle table size:** Has the per-process handle table limit increased from Switch 1's 1024 entries? The T239's larger address space and additional services may require a larger table. | Kernel | Open [SPECULATIVE] |
+| OQ-06 | **T239 GPU clock profiles:** What are the actual GPU DVFS clock states (docked vs handheld)? Switch 1 had 768 MHz docked / 384 MHz handheld; Switch 2's T239 likely has different profiles. | Hardware | Open [SPECULATIVE] |
+| OQ-07 | **Service access control lists:** Which Switch 2 services are accessible to game processes vs restricted to system processes? The access control lists likely changed to accommodate new services. | Security | Open [SPECULATIVE] |
+| OQ-08 | **NVMe storage integration:** How does the `pcie` service interact with the filesystem? Does Switch 2 use NVMe for game storage, and if so, what is the `fsp-srv` interface for NVMe-backed content? | Storage | Open [SPECULATIVE] |
+| OQ-09 | **oboromi GPU execution gap:** 195 of 206 GPU instruction stubs are `todo!()`. Which instructions are most commonly hit by real Switch 2 game shaders? Prioritizing these would maximize oboromi's shader analysis coverage. | oboromi | Open [CONFIRMED — MEM010] |
+| OQ-10 | **Memory encryption algorithm:** Is T239 memory encryption AES-XTS (inferred from NVIDIA practice) or a different algorithm? Requires hardware analysis or firmware RE. | Security | Open [SPECULATIVE — MEM019] |
+
+**Table 11.1:** Open questions requiring further research. Items tagged with
+memory IDs reference durable project knowledge captured during prior
+documentation work. [5][9]
 
 ---
 
@@ -1122,3 +1240,7 @@ referenced for T239 memory subsystem.
 https://switchbrew.org/wiki/NVN — NVN/NVN2 API reference including
 resource binding tiers, shader compilation, and command buffer model.
 Accessed 2025.
+
+[9] NVIDIA. "NVIDIA Ampere GPU Architecture In-Depth." NVIDIA Whitepaper,
+2020. — Ampere SM 8.6 architecture, RT cores, Tensor cores, async compute
+improvements relevant to T239 GPU analysis. Accessed 2025.
