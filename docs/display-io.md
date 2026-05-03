@@ -2,8 +2,10 @@
 
 > **Target:** Nintendo Switch 2 SoC — NVIDIA T239 custom processor display
 > output path, dock subsystem, and audio pipeline
-> **Document Status:** Draft — 6 sections covering LCD panel, display
-> controller, docked output modes, dock hardware, and audio subsystem
+> **Document Status:** Complete — 15 sections covering display pipeline,
+> LCD panel, display controller, docked output modes, dock hardware, audio
+> subsystem, input devices (Joy-Con 2, touchscreen), connectivity (Wi-Fi 6E,
+> Bluetooth 5.x, USB-C, NFC), camera/sensors, and gap analysis
 >
 > **Confidence Legend:**
 > - **CONFIRMED** — Verified from Nintendo official documentation, Digital Foundry hardware review, NVIDIA documentation, or oboromi source code
@@ -29,6 +31,8 @@
 13. [NFC](#13-nfc)
 14. [Camera and Sensors](#14-camera-and-sensors)
 15. [Gap Analysis](#15-gap-analysis)
+16. [Confidence Tag Summary](#confidence-tag-summary)
+17. [Citations](#citations)
 
 ---
 
@@ -119,7 +123,10 @@ services registered in oboromi's service registry: [CONFIRMED — oboromi
 | `hwopus` | Audio | Hardware Opus codec [CONFIRMED] |
 | `codecctl` | Media | Hardware codec control (H.264/H.265) [CONFIRMED] |
 
-**Table 1.2:** Horizon OS services for display and audio. [4]
+**Table 1.2:** Horizon OS services for display and audio. [4] For the
+full Horizon OS microkernel architecture, IPC protocol (HIPC), and service
+manager details, see **firmware.md** §1–§5. For GPU rendering pipeline
+details that feed the display controller, see **gpu.md** §1–§11.
 
 ---
 
@@ -410,6 +417,8 @@ artifacts. [INFERRED — Standard display scanout analysis.]
 **Table 3.5:** Display scanout bandwidth. Scanout BW = width × height ×
 bpp/8 × refresh_rate. Double-buffering doubles the bandwidth requirement
 for writes (GPU) but not reads (DC reads front buffer only). [INFERRED]
+For the full memory controller architecture and bandwidth characteristics
+including QoS arbitration, see **memory.md** §3 and §6.
 
 ---
 
@@ -508,7 +517,10 @@ internal panel resolution (1920×1080). [CONFIRMED — Nintendo specs.] [1]
 | Charging | Top USB-C port [CONFIRMED] |
 | Audio | Headphone jack or Bluetooth [INFERRED] |
 
-**Table 4.4:** Tabletop mode configuration. [CONFIRMED] [1]
+**Table 4.4:** Tabletop mode configuration. [CONFIRMED] [1] For the
+NVN2 graphics API that generates display command buffers, see **gpu.md**
+§11. For the GPU rendering pipeline that produces framebuffers consumed
+by the display controller, see **gpu.md** §9 (DLSS and Display Pipeline).
 
 ---
 
@@ -1644,7 +1656,9 @@ code `core/src/nn/mod.rs`, `core/src/sys/mod.rs`.] [4]
 **Table 15.1:** Display/IO service coverage gap analysis. All 13 feature
 areas have service stubs defined in oboromi's service registry but lack
 substantive implementation (no functional logic beyond `define_service!`
-macros). [CONFIRMED — oboromi source code.] [4]
+macros). [CONFIRMED — oboromi source code.] [4] For the firmware service
+gap analysis, see **firmware.md** §10. For the GPU implementation gap
+analysis, see **gpu.md** §13.
 
 ### 15.2 Service Stub Depth Analysis
 
@@ -1725,10 +1739,10 @@ resolved from public documentation alone. [SPECULATIVE]
 
 | Tag | Count | Percentage |
 |---|---|---|
-| CONFIRMED | 140 | 35% |
-| INFERRED | 190 | 48% |
-| SPECULATIVE | 68 | 17% |
-| **Total** | **398** | **100%** |
+| CONFIRMED | 193 | 35% |
+| INFERRED | 281 | 51% |
+| SPECULATIVE | 80 | 14% |
+| **Total** | **554** | **100%** |
 
 **Table 16.1:** Confidence tag distribution across all 15 sections. The
 majority of claims are INFERRED from closely related Tegra/Orin documentation
@@ -1760,3 +1774,37 @@ and codec services. Accessed: 2026-05-03. [CONFIRMED]
 [5] NVIDIA. "Jetson Orin Technical Reference Manual (T234)." 2022.
 Referenced as closest public documentation for T239 display controller
 architecture, DC register map, and display pipeline. [INFERRED]
+
+[6] Bluetooth SIG. "Bluetooth Core Specification v5.4." 2023.
+https://www.bluetooth.com/specifications/specs/core-specification-5-4/
+Referenced for BLE and Classic Bluetooth protocol details, audio codec
+support (SBC, AAC, aptX, LDAC), and HID over GATT for controller input.
+Accessed: 2026-05-03. [INFERRED]
+
+[7] IEEE. "802.11ax-2021 — IEEE Standard for Information Technology —
+Enhancements for High-Efficiency WLAN." 2021.
+https://standards.ieee.org/ieee/802.11ax/7349/
+Referenced for Wi-Fi 6E specifications including OFDMA, MU-MIMO, and
+6 GHz band operation. Accessed: 2026-05-03. [INFERRED]
+
+[8] USB Implementers Forum. "USB Type-C Cable and Connector Specification
+Revision 2.2." 2022. https://usb.org/document-library/usb-type-c-cable-and-connector-specification-revision-22
+Referenced for USB-C connector pinout, DisplayPort Alt Mode, and
+USB Power Delivery negotiation. Accessed: 2026-05-03. [INFERRED]
+
+[9] VESA. "DisplayPort Standard Version 2.0." 2019.
+https://vesa.org/vesa-displayport-standards/
+Referenced for DP Alt Mode lane configurations (HBR3) and 4K60 output
+capability over USB-C. Accessed: 2026-05-03. [INFERRED]
+
+[10] oboromi. "Memory System Reference (`docs/memory.md`), Firmware/OS
+Reference (`docs/firmware.md`), GPU Architecture Reference (`docs/gpu.md`)."
+Local repository. Cross-referenced for memory bandwidth figures, Horizon OS
+service architecture, NVN2 display pipeline, and service gap analyses.
+Accessed: 2026-05-03. [CONFIRMED]
+
+---
+
+*Document generated: 2026-05-03*
+*Last updated: 2026-05-03*
+*Part of oboromi M001/S06 — Display/IO hardware reference documentation*
