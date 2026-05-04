@@ -24,8 +24,6 @@
 use core::fmt;
 use std::collections::HashMap;
 use log::{trace, warn};
-use std::collections::HashMap;
-use log::{trace, warn};
 
 // ── Existing public types (preserved for backward compatibility) ────────
 
@@ -258,9 +256,9 @@ impl DispatchError {
     /// Returns the Horizon result code for this error.
     pub fn result_code(&self) -> u32 {
         match self {
-            DispatchError::ServiceNotFound => crate::kernel::result::SERVICE_NOT_FOUND,
-            DispatchError::NotImplemented => crate::kernel::result::NOT_IMPLEMENTED,
-            DispatchError::MalformedMessage => crate::kernel::result::INVALID_HANDLE,
+            DispatchError::ServiceNotFound => crate::kernel::handle_table::result::SERVICE_NOT_FOUND,
+            DispatchError::NotImplemented => crate::kernel::handle_table::result::NOT_IMPLEMENTED,
+            DispatchError::MalformedMessage => crate::kernel::handle_table::result::INVALID_HANDLE,
         }
     }
 }
@@ -1454,7 +1452,7 @@ mod tests {
 
         // Parse back
         let msg = HipcMessage::parse(&bytes, "ns").unwrap();
-        assert_eq!(msg.raw_data.len(), 8); // 4 (result_code) + 5 bytes padded to 8
+        assert_eq!(msg.raw_data.len(), 12); // 4 (result_code) + 5 bytes padded to 8 (raw_count=3 words)
         let result = u32::from_le_bytes(msg.raw_data[..4].try_into().unwrap());
         assert_eq!(result, 0xCAFE);
         assert_eq!(&msg.raw_data[4..9], &[1, 2, 3, 4, 5]);

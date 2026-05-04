@@ -169,13 +169,15 @@ pub struct Services {
 pub struct State {
     pub services: Services,
     pub gpu_state: gpu::State,
+    pub hipc_router: HipcRouter,
 }
 
 impl State {
     pub fn new() -> Self {
         Self {
             services: Services::default(),
-            gpu_state: gpu::State::default()
+            gpu_state: gpu::State::default(),
+            hipc_router: HipcRouter::new(),
         }
     }
 }
