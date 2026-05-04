@@ -267,23 +267,26 @@ fn test_efuse_str_is_noop() {
     let mut cpu = UnicornCPU::new().expect("Failed to create UnicornCPU");
 
     cpu.mmio_bus_mut()
-        .register_device("efuse", MMIO_BASE, EFUSE_SIZE, EfuseArray::new_t210());
+        .register_device("efuse", EFUSE_BASE, EFUSE_SIZE, EfuseArray::new_t210());
 
     // STR a different value to the chip ID location, then LDR back.
     // The eFuse rejects writes — the LDR should still return the original.
     // Code:
-    //   MOVZ X1, #0x1000, LSL #16   ; X1 = MMIO_BASE
+    //   MOVZ X1, #0xF800            ; X1 = 0xF800
+    //   MOVK X1, #0x7000, LSL #16   ; X1 = EFUSE_BASE (0x7000F800)
     //   MOVZ X2, #0xDEAD            ; X2 = 0xDEAD
     //   MOVK X2, #0xBEEF, LSL #16   ; X2 = 0xBEEFDEAD
     //   STR W2, [X1]                ; try to write new value to chip ID
     //   LDR W0, [X1]                ; read back via LDR
     //   BRK #0
     let code_addr = 0x1000u64;
+    let [movz, movk] = encode_load_efuse_base_into(1);
     write_code(
         &cpu,
         code_addr,
         &[
-            encode_movz(1, 0x1000, 1),     // X1 = 0x10000000
+            movz,                           // MOVZ X1, #0xF800
+            movk,                           // MOVK X1, #0x7000, LSL #16 → X1 = EFUSE_BASE
             encode_movz(2, 0xDEAD, 0),     // X2 = 0xDEAD
             0xF2A0_0000 | (1 << 21) | (0xBEEF << 5) | 2, // MOVK X2, #0xBEEF, LSL #16
             0xB900_0022,                    // STR W2, [X1] — 32-bit store
@@ -307,21 +310,24 @@ fn test_efuse_unmapped_offset_returns_zero() {
     let mut cpu = UnicornCPU::new().expect("Failed to create UnicornCPU");
 
     cpu.mmio_bus_mut()
-        .register_device("efuse", MMIO_BASE, EFUSE_SIZE, EfuseArray::new_t210());
+        .register_device("efuse", EFUSE_BASE, EFUSE_SIZE, EfuseArray::new_t210());
 
     // Offset 0x800 is beyond EFUSE_SIZE (0x400) — should return 0.
     // Code:
-    //   MOVZ X1, #0x1000, LSL #16   ; X1 = MMIO_BASE
+    //   MOVZ X1, #0xF800            ; X1 = 0xF800
+    //   MOVK X1, #0x7000, LSL #16   ; X1 = EFUSE_BASE
     //   MOVZ X2, #0x800             ; X2 = 0x800
-    //   ADD X1, X1, X2              ; X1 = MMIO_BASE + 0x800
+    //   ADD X1, X1, X2              ; X1 = EFUSE_BASE + 0x800
     //   LDR W0, [X1]                ; load from unmapped offset
     //   BRK #0
     let code_addr = 0x1000u64;
+    let [movz, movk] = encode_load_efuse_base_into(1);
     write_code(
         &cpu,
         code_addr,
         &[
-            encode_movz(1, 0x1000, 1),  // X1 = 0x10000000
+            movz,                       // MOVZ X1, #0xF800
+            movk,                       // MOVK X1, #0x7000, LSL #16 → X1 = EFUSE_BASE
             encode_movz(2, 0x800, 0),   // X2 = 0x800
             0x8B02_0021,                 // ADD X1, X1, X2
             encode_ldr_w0_x1(),          // LDR W0, [X1]
@@ -344,20 +350,23 @@ fn test_efuse_read_full_64bit_via_ldr() {
     let mut cpu = UnicornCPU::new().expect("Failed to create UnicornCPU");
 
     cpu.mmio_bus_mut()
-        .register_device("efuse", MMIO_BASE, EFUSE_SIZE, EfuseArray::new_t210());
+        .register_device("efuse", EFUSE_BASE, EFUSE_SIZE, EfuseArray::new_t210());
 
     // 64-bit LDR from offset 0: combines chip ID (lo) + vendor code (hi)
     // Expected: 0x4E56_4944_0000_0035
     // Code:
-    //   MOVZ X1, #0x1000, LSL #16   ; X1 = MMIO_BASE
+    //   MOVZ X1, #0xF800            ; X1 = 0xF800
+    //   MOVK X1, #0x7000, LSL #16   ; X1 = EFUSE_BASE (0x7000F800)
     //   LDR X0, [X1]                ; load 64-bit → X0
     //   BRK #0
     let code_addr = 0x1000u64;
+    let [movz, movk] = encode_load_efuse_base_into(1);
     write_code(
         &cpu,
         code_addr,
         &[
-            encode_movz(1, 0x1000, 1), // X1 = 0x10000000
+            movz,                       // MOVZ X1, #0xF800
+            movk,                       // MOVK X1, #0x7000, LSL #16 → X1 = EFUSE_BASE
             encode_ldr_x0_x1(),         // LDR X0, [X1]
             encode_brk(),
         ],
