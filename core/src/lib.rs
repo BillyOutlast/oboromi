@@ -2,6 +2,7 @@ pub mod cpu;
 pub mod fs;
 pub mod gpu;
 pub mod mmio;
+pub mod security;
 pub mod tests;
 pub mod nn;
 pub mod sys;
