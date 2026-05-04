@@ -3,6 +3,7 @@ use std::rc::Rc;
 use unicorn_engine::{Arch, Mode, Prot, RegisterARM64, Unicorn};
 
 use crate::mmio::MmioBus;
+use crate::security::efuse::{EFUSE_BASE, EFUSE_SIZE};
 use super::exception::ExceptionModule;
 use crate::mmio::gic::GicDistributor;
 
@@ -73,6 +74,30 @@ impl UnicornCPU {
         })
         .ok()?;
 
+        // Register EFUSE MMIO hooks at the real hardware address
+        // (0x7000F800). This is a second, dedicated mmio_map so that
+        // ARM64 LDR/STR instructions targeting EFUSE_BASE trigger
+        // MMIO hooks through the same MmioBus. Resolves MEM054.
+        emu.mmio_map(
+            EFUSE_BASE,
+            EFUSE_SIZE,
+            Some(move |uc: &mut Unicorn<'_, Rc<RefCell<MmioBus>>>, offset: u64, size: usize| {
+                let bus = uc.get_data_mut();
+                let addr = EFUSE_BASE + offset;
+                bus.borrow().read(addr, size as u32)
+            }),
+            Some(move |uc: &mut Unicorn<'_, Rc<RefCell<MmioBus>>>, offset: u64, size: usize, value: u64| {
+                let bus = uc.get_data_mut();
+                let addr = EFUSE_BASE + offset;
+                bus.borrow_mut().write(addr, size as u32, value);
+            }),
+        )
+        .map_err(|e| {
+            eprintln!("Failed to map EFUSE MMIO region: {e:?}");
+            e
+        })
+        .ok()?;
+
         // Initialize stack pointer
         let _ = emu.reg_write(RegisterARM64::SP, (8 * 1024 * 1024) - 0x1000);
 
@@ -135,15 +160,55 @@ impl UnicornCPU {
         })
         .ok()?;
 
-        // Part 2: MMIO_BASE+MMIO_SIZE..memory_size (shared memory after MMIO region)
+        // Part 2: split around the EFUSE region (0x7000F800–0x7000FC00) so
+        // that ARM64 LDR targeting EFUSE_BASE reaches the real hardware
+        // address through dedicated mmio_map hooks (MEM054).
         let mmio_end = MMIO_BASE + MMIO_SIZE;
-        if mmio_end < memory_size {
+
+        // Part 2a: mmio_end..EFUSE_BASE (shared memory between MMIO and eFuse)
+        if mmio_end < EFUSE_BASE {
             unsafe {
-                let part2_ptr = memory_ptr.add(mmio_end as usize);
-                let part2_size = memory_size - mmio_end;
-                emu.mem_map_ptr(mmio_end, part2_size, Prot::ALL, part2_ptr as *mut std::ffi::c_void)
+                let part2a_ptr = memory_ptr.add(mmio_end as usize);
+                let part2a_size = EFUSE_BASE - mmio_end;
+                emu.mem_map_ptr(mmio_end, part2a_size, Prot::ALL, part2a_ptr as *mut std::ffi::c_void)
                     .map_err(|e| {
-                        eprintln!("Failed to map shared memory (high) for core {}: {:?}", core_id, e);
+                        eprintln!("Failed to map shared memory (part2a) for core {}: {:?}", core_id, e);
+                        e
+                    })
+                    .ok()?;
+            }
+        }
+
+        // EFUSE MMIO hooks at real hardware address (0x7000F800)
+        emu.mmio_map(
+            EFUSE_BASE,
+            EFUSE_SIZE,
+            Some(move |uc: &mut Unicorn<'_, Rc<RefCell<MmioBus>>>, offset: u64, size: usize| {
+                let bus = uc.get_data_mut();
+                let addr = EFUSE_BASE + offset;
+                bus.borrow().read(addr, size as u32)
+            }),
+            Some(move |uc: &mut Unicorn<'_, Rc<RefCell<MmioBus>>>, offset: u64, size: usize, value: u64| {
+                let bus = uc.get_data_mut();
+                let addr = EFUSE_BASE + offset;
+                bus.borrow_mut().write(addr, size as u32, value);
+            }),
+        )
+        .map_err(|e| {
+            eprintln!("Failed to map EFUSE MMIO region for core {}: {:?}", core_id, e);
+            e
+        })
+        .ok()?;
+
+        // Part 2b: EFUSE_BASE + EFUSE_SIZE..memory_size (shared memory after eFuse)
+        let efuse_end = EFUSE_BASE + EFUSE_SIZE;
+        if efuse_end < memory_size {
+            unsafe {
+                let part2b_ptr = memory_ptr.add(efuse_end as usize);
+                let part2b_size = memory_size - efuse_end;
+                emu.mem_map_ptr(efuse_end, part2b_size, Prot::ALL, part2b_ptr as *mut std::ffi::c_void)
+                    .map_err(|e| {
+                        eprintln!("Failed to map shared memory (part2b) for core {}: {:?}", core_id, e);
                         e
                     })
                     .ok()?;

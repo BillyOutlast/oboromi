@@ -4,7 +4,6 @@
 //! These tests exercise the full MMIO path: register device → encode ARM64
 //! instructions → run emulation → read register values back.
 
-use crate::cpu::unicorn_interface::MMIO_BASE;
 use crate::cpu::UnicornCPU;
 use crate::security::efuse::{EfuseArray, EFUSE_BASE, EFUSE_SIZE};
 
@@ -52,9 +51,23 @@ fn encode_movz(d: u32, imm16: u32, hw: u32) -> u32 {
     0xD280_0000 | (hw << 21) | (imm16 << 5) | d
 }
 
+/// Encode `MOVK Xd, #imm16, LSL #(hw*16)`.
+fn encode_movk(d: u32, imm16: u32, hw: u32) -> u32 {
+    0xF280_0000 | (hw << 21) | (imm16 << 5) | d
+}
+
 /// Encode `BRK #0` — halts emulation.
 fn encode_brk() -> u32 {
     0xD420_0000
+}
+
+/// Write MOVZ+MOVK pair to load EFUSE_BASE (0x7000F800) into Xd.
+/// Returns two instructions: `[MOVZ, MOVK]`.
+fn encode_load_efuse_base_into(d: u32) -> [u32; 2] {
+    [
+        encode_movz(d, 0xF800, 0),      // MOVZ Xd, #0xF800
+        encode_movk(d, 0x7000, 1),      // MOVK Xd, #0x7000, LSL #16 → Xd = 0x7000F800
+    ]
 }
 
 /// Write a sequence of 32-bit instructions into the UnicornCPU memory.
@@ -98,20 +111,24 @@ fn test_efuse_registers_on_mmio_bus() {
 fn test_efuse_read_chip_id_via_ldr() {
     let mut cpu = UnicornCPU::new().expect("Failed to create UnicornCPU");
 
-    // Register eFuse at MMIO_BASE so Unicorn's mmio_map hooks intercept LDR
+    // Register eFuse at EFUSE_BASE (0x7000F800) — the dedicated mmio_map
+    // hook in UnicornCPU intercepts ARM64 LDR targeting this address.
     cpu.mmio_bus_mut()
-        .register_device("efuse", MMIO_BASE, EFUSE_SIZE, EfuseArray::new_t210());
+        .register_device("efuse", EFUSE_BASE, EFUSE_SIZE, EfuseArray::new_t210());
 
     // Code at 0x1000:
-    //   MOVZ X1, #0x1000, LSL #16   ; X1 = MMIO_BASE (0x10000000)
+    //   MOVZ X1, #0xF800            ; X1 = 0xF800
+    //   MOVK X1, #0x7000, LSL #16   ; X1 = EFUSE_BASE (0x7000F800)
     //   LDR W0, [X1]                ; load 32-bit chip ID → W0 (X0 low 32b)
     //   BRK #0
     let code_addr = 0x1000u64;
+    let [movz, movk] = encode_load_efuse_base_into(1);
     write_code(
         &cpu,
         code_addr,
         &[
-            encode_movz(1, 0x1000, 1), // X1 = 0x10000000
+            movz,                       // MOVZ X1, #0xF800
+            movk,                       // MOVK X1, #0x7000, LSL #16 → X1 = EFUSE_BASE
             encode_ldr_w0_x1(),         // LDR W0, [X1] → reads offset 0 (chip ID)
             encode_brk(),
         ],
@@ -133,19 +150,22 @@ fn test_efuse_read_vendor_code_via_ldr() {
     let mut cpu = UnicornCPU::new().expect("Failed to create UnicornCPU");
 
     cpu.mmio_bus_mut()
-        .register_device("efuse", MMIO_BASE, EFUSE_SIZE, EfuseArray::new_t210());
+        .register_device("efuse", EFUSE_BASE, EFUSE_SIZE, EfuseArray::new_t210());
 
     // Code at 0x1000:
-    //   MOVZ X1, #0x1000, LSL #16   ; X1 = MMIO_BASE
+    //   MOVZ X1, #0xF800            ; X1 = 0xF800
+    //   MOVK X1, #0x7000, LSL #16   ; X1 = EFUSE_BASE
     //   LDR W0, [X1, #4]            ; load 32-bit from offset 4 → vendor code
     //   BRK #0
     let code_addr = 0x1000u64;
+    let [movz, movk] = encode_load_efuse_base_into(1);
     write_code(
         &cpu,
         code_addr,
         &[
-            encode_movz(1, 0x1000, 1),       // X1 = 0x10000000
-            encode_ldr_w_offset(0, 1, 4),     // LDR W0, [X1, #4]
+            movz,                           // MOVZ X1, #0xF800
+            movk,                           // MOVK X1, #0x7000, LSL #16 → X1 = EFUSE_BASE
+            encode_ldr_w_offset(0, 1, 4),   // LDR W0, [X1, #4]
             encode_brk(),
         ],
     );
@@ -165,23 +185,26 @@ fn test_efuse_read_dram_config_via_ldr() {
     let mut cpu = UnicornCPU::new().expect("Failed to create UnicornCPU");
 
     cpu.mmio_bus_mut()
-        .register_device("efuse", MMIO_BASE, EFUSE_SIZE, EfuseArray::new_t210());
+        .register_device("efuse", EFUSE_BASE, EFUSE_SIZE, EfuseArray::new_t210());
 
     // DRAM config is at offset 0x100 — word 0 of Reserved_ODM4.
     // Value: 0x00000004 (DRAM size = 4 GB).
     // Code:
-    //   MOVZ X1, #0x1000, LSL #16   ; X1 = MMIO_BASE
+    //   MOVZ X1, #0xF800            ; X1 = 0xF800
+    //   MOVK X1, #0x7000, LSL #16   ; X1 = EFUSE_BASE
     //   MOVZ X2, #0x100             ; X2 = 0x100 (offset for DRAM config)
-    //   ADD X1, X1, X2              ; X1 = MMIO_BASE + 0x100
+    //   ADD X1, X1, X2              ; X1 = EFUSE_BASE + 0x100
     //   LDR W0, [X1]                ; load DRAM config word
     //   BRK #0
     let code_addr = 0x1000u64;
+    let [movz, movk] = encode_load_efuse_base_into(1);
     write_code(
         &cpu,
         code_addr,
         &[
-            encode_movz(1, 0x1000, 1),  // X1 = 0x10000000
-            encode_movz(2, 0x100, 0),   // X2 = 0x100
+            movz,                       // MOVZ X1, #0xF800
+            movk,                       // MOVK X1, #0x7000, LSL #16 → X1 = EFUSE_BASE
+            encode_movz(2, 0x100, 0),   // MOVZ X2, #0x100
             0x8B02_0021,                 // ADD X1, X1, X2
             encode_ldr_w0_x1(),          // LDR W0, [X1]
             encode_brk(),
@@ -203,23 +226,26 @@ fn test_efuse_read_security_flags_via_ldr() {
     let mut cpu = UnicornCPU::new().expect("Failed to create UnicornCPU");
 
     cpu.mmio_bus_mut()
-        .register_device("efuse", MMIO_BASE, EFUSE_SIZE, EfuseArray::new_t210());
+        .register_device("efuse", EFUSE_BASE, EFUSE_SIZE, EfuseArray::new_t210());
 
     // Security flags at offset 0x108 (word 2 of Reserved_ODM4).
     // Value: 0x00000001 (secure boot enabled).
     // Code:
-    //   MOVZ X1, #0x1000, LSL #16   ; X1 = MMIO_BASE
+    //   MOVZ X1, #0xF800            ; X1 = 0xF800
+    //   MOVK X1, #0x7000, LSL #16   ; X1 = EFUSE_BASE
     //   MOVZ X2, #0x108             ; X2 = 0x108
-    //   ADD X1, X1, X2              ; X1 = MMIO_BASE + 0x108
+    //   ADD X1, X1, X2              ; X1 = EFUSE_BASE + 0x108
     //   LDR W0, [X1]                ; load security flags
     //   BRK #0
     let code_addr = 0x1000u64;
+    let [movz, movk] = encode_load_efuse_base_into(1);
     write_code(
         &cpu,
         code_addr,
         &[
-            encode_movz(1, 0x1000, 1),  // X1 = 0x10000000
-            encode_movz(2, 0x108, 0),   // X2 = 0x108
+            movz,                       // MOVZ X1, #0xF800
+            movk,                       // MOVK X1, #0x7000, LSL #16 → X1 = EFUSE_BASE
+            encode_movz(2, 0x108, 0),   // MOVZ X2, #0x108
             0x8B02_0021,                 // ADD X1, X1, X2
             encode_ldr_w0_x1(),          // LDR W0, [X1]
             encode_brk(),
