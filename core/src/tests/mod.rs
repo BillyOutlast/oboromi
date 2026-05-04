@@ -7,6 +7,7 @@ pub mod exception_test;
 pub mod gic_test;
 pub mod gic_e2e_test;
 pub mod efuse_test;
+pub mod nca_integration_test;
 
 pub use run::run_tests;
 pub use gpu_test::run_gpu_tests;
