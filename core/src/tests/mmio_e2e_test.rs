@@ -116,7 +116,7 @@ const DEVICE_BASE: u64 = MMIO_BASE;
 
 #[test]
 fn test_mmio_e2e_register_read_write_cycle() {
-    let mut manager = CpuManager::new();
+    let mut manager = CpuManager::new_with_size(512 * 1024 * 1024);
 
     // Register a TestDevice with ID=0xABCD on all cores
     manager.register_mmio_device("test_dev", DEVICE_BASE, 0x1000, || {
@@ -186,7 +186,7 @@ fn test_mmio_e2e_register_read_write_cycle() {
 
 #[test]
 fn test_mmio_e2e_shared_memory_with_mmio_registered() {
-    let mut manager = CpuManager::new();
+    let mut manager = CpuManager::new_with_size(512 * 1024 * 1024);
 
     // Register an MMIO device on all cores
     manager.register_mmio_device("test_dev", DEVICE_BASE, 0x1000, || {

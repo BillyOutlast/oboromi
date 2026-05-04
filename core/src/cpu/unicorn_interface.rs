@@ -25,7 +25,8 @@ pub struct UnicornCPU {
     /// Shared with hook closures via Rc.
     exception: Rc<RefCell<ExceptionModule>>,
     /// Shared GIC distributor reference for IRQ delivery peek.
-    gic_dist: Option<Rc<RefCell<GicDistributor>>>,
+    /// Set by CpuManager::register_gic() after construction.
+    pub(crate) gic_dist: Option<Rc<RefCell<GicDistributor>>>,
     pub core_id: u32,
 }
 
@@ -414,33 +415,39 @@ impl UnicornCPU {
     /// Returns the IRQ number delivered, or None if no qualifying interrupt.
     ///
     /// Delivery sequence:
-    /// 1. Read GICC_IAR via MMIO (triggers acknowledge_irq on GicV3)
-    /// 2. If IAR == 1023 (spurious), return None
-    /// 3. Save current PSTATE to SPSR_EL1
-    /// 4. Save current PC to ELR_EL1
-    /// 5. Set PSTATE.CurrentEL to EL1
-    /// 6. Set PC to VBAR_EL1 + VEC_IRQ_OFFSET (0x480)
+    /// 1. Peek at the best pending+enabled+unmasked IRQ for this core
+    ///    (using GicDistributor::peek_pending_irq — does NOT acknowledge)
+    /// 2. If no qualifying IRQ, return None
+    /// 3. Save current PSTATE to SPSR_EL1, PC to ELR_EL1
+    /// 4. Set PSTATE.CurrentEL to EL1
+    /// 5. Set PC to VBAR_EL1 + VEC_IRQ_OFFSET (0x480)
+    ///
+    /// The actual interrupt acknowledgment (GICC_IAR read) happens inside the
+    /// IRQ handler running in the emulator — the GIC's MMIO hooks will route
+    /// that read through acknowledge_irq().
     pub fn deliver_irq(&self) -> Option<u32> {
-        // Read GICC_IAR for this core's redistributor region via MMIO.
-        // IAR address = GIC base + GICR base offset + core_id * GICR_REGION_SIZE
-        //             + GICC sub-region offset + GICC_IAR offset
-        let gicc_iar_addr = MMIO_BASE + 0x10000  // GICR_BASE_OFFSET
-            + (self.core_id as u64) * 0x20000     // GICR_REGION_SIZE
-            + 0x10000                              // GICC sub-region within redistributor
-            + 0x000C;                              // GICC_IAR
+        // Phase 1: Read PMR for this core to use with peek_pending_irq
+        let pmr_addr = MMIO_BASE + 0x10000  // GICR_BASE_OFFSET
+            + (self.core_id as u64) * 0x20000 // GICR_REGION_SIZE
+            + 0x10000                         // GICC sub-region
+            + 0x0004;                         // GICC_PMR
+        let pmr = self.mmio_bus.borrow().read(pmr_addr, 4) as u8;
 
-        // Read through MMIO bus — triggers acknowledge_irq as a side effect
-        let iar = self.read_u32(gicc_iar_addr);
+        // Phase 2: Peek at the best pending IRQ (does NOT acknowledge)
+        let best_irq = self.gic_dist.as_ref().and_then(|dist| {
+            dist.borrow().peek_pending_irq(self.core_id as usize, pmr)
+        });
 
-        if iar == 1023 {
-            log::debug!(
-                "deliver_irq: core {} has no qualifying interrupt (spurious)",
-                self.core_id
-            );
-            return None;
-        }
-
-        let irq_id = iar;
+        let irq_id = match best_irq {
+            Some(id) => id,
+            None => {
+                log::debug!(
+                    "deliver_irq: core {} has no qualifying interrupt (spurious)",
+                    self.core_id
+                );
+                return None;
+            }
+        };
 
         // Save current state
         let pc = self.get_pc();
@@ -491,6 +498,20 @@ impl UnicornCPU {
         );
 
         Some(irq_id)
+    }
+
+    /// Read from the MMIO bus at an absolute address.
+    ///
+    /// This is the correct way to access MMIO devices from outside emulation
+    /// (e.g., in tests or the control loop) — `emu.mem_read()` bypasses the
+    /// mmio_map hooks.
+    pub fn mmio_read(&self, addr: u64, size: u32) -> u64 {
+        self.mmio_bus.borrow().read(addr, size)
+    }
+
+    /// Write to the MMIO bus at an absolute address.
+    pub fn mmio_write(&self, addr: u64, size: u32, value: u64) {
+        self.mmio_bus.borrow_mut().write(addr, size, value);
     }
 }
 

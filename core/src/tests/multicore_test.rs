@@ -1,20 +1,22 @@
 #[cfg(test)]
 mod tests {
-    use crate::cpu::cpu_manager::{CpuManager, MEMORY_SIZE};
+    use crate::cpu::cpu_manager::CpuManager;
+
+    const TEST_MEM_SIZE: u64 = 512 * 1024 * 1024; // 512MB
 
     #[test]
     fn test_multicore_initialization() {
-        println!("Initializing 8-core CPU Manager with 12GB RAM...");
-        let manager = CpuManager::new();
+        println!("Initializing 8-core CPU Manager with 512MB RAM...");
+        let manager = CpuManager::new_with_size(TEST_MEM_SIZE);
         
         assert_eq!(manager.cores.len(), 8, "Should have 8 cores");
-        assert_eq!(manager.shared_memory.len() as u64, MEMORY_SIZE, "Memory should be 12GB");
+        assert_eq!(manager.shared_memory.len() as u64, TEST_MEM_SIZE, "Memory should be 512MB");
     }
 
     #[test]
     fn test_shared_memory_access() {
         println!("Testing shared memory between cores...");
-        let manager = CpuManager::new();
+        let manager = CpuManager::new_with_size(TEST_MEM_SIZE);
         
         let core0 = manager.get_core(0).expect("Core 0 missing");
         let core1 = manager.get_core(1).expect("Core 1 missing");

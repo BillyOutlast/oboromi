@@ -30,20 +30,30 @@ pub struct CpuManager {
 }
 
 impl CpuManager {
+    /// Create a new CpuManager with the default (12GB) memory size.
     pub fn new() -> Self {
-        // Allocate 12GB of zeroed memory
+        Self::new_with_size(MEMORY_SIZE)
+    }
+
+    /// Create a new CpuManager with a custom memory size.
+    ///
+    /// Use this for tests that don't need 12GB (e.g., `256 * 1024 * 1024` for
+    /// 256MB is sufficient for most functional tests). The minimum is larger
+    /// than `MMIO_BASE + MMIO_SIZE` (~272MB) so stack can be placed above MMIO.
+    pub fn new_with_size(memory_size: u64) -> Self {
+        // Allocate zeroed memory
         // note: on modern OSs, this is lazily allocated (virtual memory)
         // and won't consume physical RAM until written to.
-        let shared_memory = Pin::new(vec![0u8; MEMORY_SIZE as usize].into_boxed_slice());
+        let shared_memory = Pin::new(vec![0u8; memory_size as usize].into_boxed_slice());
         let memory_ptr = shared_memory.as_ptr() as *mut u8;
 
         let mut cores = Vec::with_capacity(CORE_COUNT);
 
         for i in 0..CORE_COUNT {
             // Create CPU core sharing the same memory pointer
-            // Safety: The memory is owned by CpuManager and pinned in place (Vec won't realloc if we don't push)
+            // Safety: The memory is owned by CpuManager and pinned in place
             // and UnicornCPU will use it for the lifetime of CpuManager.
-            let cpu = unsafe { UnicornCPU::new_with_shared_mem(i as u32, memory_ptr, MEMORY_SIZE) };
+            let cpu = unsafe { UnicornCPU::new_with_shared_mem(i as u32, memory_ptr, memory_size) };
             
             if let Some(cpu) = cpu {
                 cores.push(cpu);
@@ -127,6 +137,8 @@ impl CpuManager {
         for (i, core) in self.cores.iter_mut().enumerate() {
             let device = GicV3::new_with_shared_dist(core_count, dist.clone());
             core.mmio_bus_mut().register_device("gicv3", GIC_BASE, GIC_SIZE, device);
+            // Wire the distributor reference into the core so deliver_irq() can peek
+            core.gic_dist = Some(dist.clone());
             info!(
                 "CpuManager: registered GICv3 MMIO device at {:#x}..{:#x} on core {}",
                 GIC_BASE, GIC_BASE + GIC_SIZE, i

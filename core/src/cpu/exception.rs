@@ -30,10 +30,13 @@ const ERET_ENCODING: u32 = 0xD69F03E0;
 /// Synchronous exceptions (SVC, SMC, etc.) use offset 0x400
 const VEC_SYNC_OFFSET: u64 = 0x400;
 /// IRQ exceptions use offset 0x480
+#[allow(dead_code)]
 const VEC_IRQ_OFFSET: u64 = 0x480;
 /// FIQ exceptions use offset 0x500
+#[allow(dead_code)]
 const VEC_FIQ_OFFSET: u64 = 0x500;
 /// SError exceptions use offset 0x580
+#[allow(dead_code)]
 const VEC_SERROR_OFFSET: u64 = 0x580;
 
 /// Exception module for ARM64 exception level management.

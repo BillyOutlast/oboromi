@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_exception_level_preserves_across_cores() {
-        let manager = crate::cpu::cpu_manager::CpuManager::new();
+        let manager = crate::cpu::cpu_manager::CpuManager::new_with_size(512 * 1024 * 1024);
 
         // SVC on core 0
         {
