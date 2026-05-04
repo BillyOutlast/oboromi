@@ -1,5 +1,6 @@
 use crate::nn;
 use crate::sys;
+use crate::nn::hipc::HipcRouter;
 
 pub mod hipc;
 

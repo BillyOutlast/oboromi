@@ -22,6 +22,10 @@
 //! - C (-): Handle — copy/move kernel object handle
 
 use core::fmt;
+use std::collections::HashMap;
+use log::{trace, warn};
+use std::collections::HashMap;
+use log::{trace, warn};
 
 // ── Existing public types (preserved for backward compatibility) ────────
 
@@ -221,6 +225,222 @@ impl fmt::Display for ParseError {
             }
             ParseError::InvalidHandleIndex(i) => write!(f, "Invalid handle index: {}", i),
         }
+    }
+}
+
+/// Maximum number of methods per service dispatch table.
+pub const MAX_METHODS_PER_SERVICE: u32 = 256;
+
+// ── Dispatch Router Types ──────────────────────────────────────────────
+
+/// Errors returned by HIPC dispatch operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchError {
+    /// The requested service is not registered in the router.
+    ServiceNotFound,
+    /// The service is registered but method_id has no handler.
+    NotImplemented,
+    /// The message was malformed or parse failed.
+    MalformedMessage,
+}
+
+impl fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DispatchError::ServiceNotFound => write!(f, "HIPC service not found"),
+            DispatchError::NotImplemented => write!(f, "HIPC method not implemented"),
+            DispatchError::MalformedMessage => write!(f, "HIPC malformed message"),
+        }
+    }
+}
+
+impl DispatchError {
+    /// Returns the Horizon result code for this error.
+    pub fn result_code(&self) -> u32 {
+        match self {
+            DispatchError::ServiceNotFound => crate::kernel::result::SERVICE_NOT_FOUND,
+            DispatchError::NotImplemented => crate::kernel::result::NOT_IMPLEMENTED,
+            DispatchError::MalformedMessage => crate::kernel::result::INVALID_HANDLE,
+        }
+    }
+}
+
+/// A HIPC response message: result code, output data, and moved handles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HipcResponse {
+    pub result_code: u32,
+    pub data: Vec<u8>,
+    pub moved_handles: Vec<u32>,
+}
+
+impl HipcResponse {
+    /// Creates a response with just a result code.
+    pub fn new(result_code: u32) -> Self {
+        HipcResponse {
+            result_code,
+            data: Vec::new(),
+            moved_handles: Vec::new(),
+        }
+    }
+
+    /// Creates a response with result code and data.
+    pub fn with_data(result_code: u32, data: Vec<u8>) -> Self {
+        HipcResponse {
+            result_code,
+            data,
+            moved_handles: Vec::new(),
+        }
+    }
+
+    /// Serializes this response into HIPC wire-format bytes.
+    ///
+    /// Wire layout:
+    /// ```text
+    /// +0x00  hdr0: tag(16)=0 | ptr_count(4) | send/recv/xchg=0
+    /// +0x04  hdr1: raw_count(10) in words | special=0
+    /// +0x08.. raw data: result_code u32 + payload padded to word boundary
+    /// +...    C descriptors: one word per moved handle (move flag set)
+    /// ```
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let payload_words = (self.data.len() + 3) / 4;
+        let raw_words = 1usize + payload_words; // result_code + payload
+        let raw_count = (raw_words as u32) & 0x3FF;
+        let ptr_count = self.moved_handles.len() as u32;
+
+        let hdr0 = ptr_count << 16;
+        let hdr1 = raw_count;
+
+        let cap = 8 + raw_words * 4 + self.moved_handles.len() * 4;
+        let mut buf = Vec::with_capacity(cap);
+
+        buf.extend_from_slice(&hdr0.to_le_bytes());
+        buf.extend_from_slice(&hdr1.to_le_bytes());
+        buf.extend_from_slice(&self.result_code.to_le_bytes());
+        buf.extend_from_slice(&self.data);
+        // Pad payload to word boundary with zeros
+        let pad_needed = (4 - (self.data.len() % 4)) % 4;
+        buf.extend(std::iter::repeat_n(0u8, pad_needed));
+        // C descriptors: moved handles
+        for &hid in &self.moved_handles {
+            buf.extend_from_slice(&((hid << 16) | 0x8000u32).to_le_bytes());
+        }
+        buf
+    }
+}
+
+/// Handler function type: receives raw data, returns a response.
+pub type HipcHandlerFn = fn(data: &[u8]) -> HipcResponse;
+
+/// Per-service method dispatch table indexed by method_id (0..255).
+pub struct ServiceDispatchTable {
+    name: String,
+    methods: Vec<Option<HipcHandlerFn>>,
+}
+
+impl ServiceDispatchTable {
+    pub fn new(name: String) -> Self {
+        ServiceDispatchTable {
+            name,
+            methods: Vec::new(),
+        }
+    }
+
+    /// Registers a handler at method_id. Grows methods vec as needed (caps at 256).
+    pub fn register(&mut self, method_id: u32, handler: HipcHandlerFn) {
+        let idx = method_id as usize;
+        if idx >= self.methods.len() {
+            self.methods.resize_with(idx + 1, || None);
+        }
+        if self.methods[idx].is_some() {
+            warn!(
+                "ServiceDispatchTable: overwriting method_id={} for '{}'",
+                method_id, self.name
+            );
+        }
+        self.methods[idx] = Some(handler);
+        trace!(
+            "ServiceDispatchTable: registered '{}' method_id={}",
+            self.name,
+            method_id
+        );
+    }
+
+    pub fn dispatch(&self, method_id: u32) -> Option<&HipcHandlerFn> {
+        self.methods.get(method_id as usize).and_then(|m| m.as_ref())
+    }
+
+    pub fn service_name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn registered_count(&self) -> usize {
+        self.methods.iter().filter(|m| m.is_some()).count()
+    }
+}
+
+/// HIPC dispatch router: O(1) (service_name, method_id) → handler.
+pub struct HipcRouter {
+    services: HashMap<String, ServiceDispatchTable>,
+}
+
+impl HipcRouter {
+    pub fn new() -> Self {
+        HipcRouter {
+            services: HashMap::new(),
+        }
+    }
+
+    /// Registers a handler for (service_name, method_id). Auto-creates the table.
+    pub fn register(&mut self, service_name: &str, method_id: u32, handler: HipcHandlerFn) {
+        let table = self
+            .services
+            .entry(service_name.to_string())
+            .or_insert_with(|| ServiceDispatchTable::new(service_name.to_string()));
+        table.register(method_id, handler);
+    }
+
+    /// Dispatches to handler. Returns ServiceNotFound / NotImplemented on miss.
+    pub fn dispatch(
+        &self,
+        service_name: &str,
+        method_id: u32,
+        data: &[u8],
+    ) -> Result<HipcResponse, DispatchError> {
+        let table = self.services.get(service_name).ok_or_else(|| {
+            warn!("HipcRouter: service not found: '{}'", service_name);
+            DispatchError::ServiceNotFound
+        })?;
+        let handler = table.dispatch(method_id).ok_or_else(|| {
+            warn!(
+                "HipcRouter: method {} not implemented for '{}'",
+                method_id, service_name
+            );
+            DispatchError::NotImplemented
+        })?;
+        trace!(
+            "HipcRouter::dispatch: '{}' method_id={}",
+            service_name,
+            method_id
+        );
+        Ok(handler(data))
+    }
+
+    pub fn registered_services(&self) -> Vec<String> {
+        self.services.keys().cloned().collect()
+    }
+
+    pub fn service_count(&self) -> usize {
+        self.services.len()
+    }
+
+    pub fn total_handler_count(&self) -> usize {
+        self.services.values().map(|t| t.registered_count()).sum()
+    }
+}
+
+impl Default for HipcRouter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1077,6 +1297,349 @@ mod tests {
                 xchg,
                 result.err()
             );
+        }
+    }
+
+    // ── Dispatch & Response Tests ───────────────────────────────────────
+
+    // Sample handlers
+    fn handler_echo(data: &[u8]) -> HipcResponse {
+        HipcResponse::with_data(0, data.to_vec())
+    }
+
+    fn handler_static_reply(_data: &[u8]) -> HipcResponse {
+        HipcResponse::new(0x42)
+    }
+
+    fn handler_with_handles(_data: &[u8]) -> HipcResponse {
+        HipcResponse {
+            result_code: 0,
+            data: vec![0xAB, 0xCD],
+            moved_handles: vec![3, 7],
+        }
+    }
+
+    fn handler_big_reply(_data: &[u8]) -> HipcResponse {
+        HipcResponse::with_data(0, vec![0xAA; 256])
+    }
+
+    #[test]
+    fn test_router_register_and_dispatch() {
+        let mut router = HipcRouter::new();
+        router.register("ns", 0, handler_echo);
+
+        let resp = router.dispatch("ns", 0, &[1, 2, 3]).unwrap();
+        assert_eq!(resp.result_code, 0);
+        assert_eq!(resp.data, vec![1, 2, 3]);
+        assert!(resp.moved_handles.is_empty());
+    }
+
+    #[test]
+    fn test_router_service_not_found() {
+        let router = HipcRouter::new();
+        let result = router.dispatch("nonexistent", 0, &[]);
+        assert!(matches!(result, Err(DispatchError::ServiceNotFound)));
+        assert_eq!(result.unwrap_err().result_code(), 0x415);
+    }
+
+    #[test]
+    fn test_router_not_implemented() {
+        let mut router = HipcRouter::new();
+        router.register("fs", 1, handler_static_reply);
+        // method_id 99 not registered
+        let result = router.dispatch("fs", 99, &[]);
+        assert!(matches!(result, Err(DispatchError::NotImplemented)));
+        assert_eq!(result.unwrap_err().result_code(), 0x1A01);
+    }
+
+    #[test]
+    fn test_router_empty_service_not_implemented() {
+        let mut router = HipcRouter::new();
+        router.register("hid", 0, handler_static_reply);
+        // method_id 7 not registered
+        let result = router.dispatch("hid", 7, &[]);
+        assert!(matches!(result, Err(DispatchError::NotImplemented)));
+    }
+
+    #[test]
+    fn test_router_multiple_services() {
+        let mut router = HipcRouter::new();
+        router.register("ns", 0, handler_echo);
+        router.register("fs", 1, handler_static_reply);
+        router.register("hid", 2, handler_with_handles);
+
+        let r1 = router.dispatch("ns", 0, &[0xDE]).unwrap();
+        assert_eq!(r1.data, vec![0xDE]);
+
+        let r2 = router.dispatch("fs", 1, &[]).unwrap();
+        assert_eq!(r2.result_code, 0x42);
+
+        let r3 = router.dispatch("hid", 2, &[]).unwrap();
+        assert_eq!(r3.moved_handles, vec![3, 7]);
+    }
+
+    #[test]
+    fn test_router_multiple_methods_per_service() {
+        let mut router = HipcRouter::new();
+        router.register("set", 0, handler_static_reply);
+        router.register("set", 1, handler_echo);
+        router.register("set", 2, handler_with_handles);
+
+        let r0 = router.dispatch("set", 0, &[]).unwrap();
+        assert_eq!(r0.result_code, 0x42);
+
+        let r1 = router.dispatch("set", 1, &[0x99]).unwrap();
+        assert_eq!(r1.data, vec![0x99]);
+
+        let r2 = router.dispatch("set", 2, &[]).unwrap();
+        assert_eq!(r2.moved_handles, vec![3, 7]);
+    }
+
+    #[test]
+    fn test_router_registered_services() {
+        let mut router = HipcRouter::new();
+        router.register("ns", 0, handler_echo);
+        router.register("fs", 1, handler_static_reply);
+
+        let mut services = router.registered_services();
+        services.sort();
+        assert_eq!(services, vec!["fs", "ns"]);
+        assert_eq!(router.service_count(), 2);
+        assert_eq!(router.total_handler_count(), 2);
+    }
+
+    #[test]
+    fn test_router_empty_no_services() {
+        let router = HipcRouter::new();
+        assert_eq!(router.service_count(), 0);
+        assert_eq!(router.total_handler_count(), 0);
+        assert!(router.registered_services().is_empty());
+    }
+
+    #[test]
+    fn test_response_new() {
+        let resp = HipcResponse::new(0x1234);
+        assert_eq!(resp.result_code, 0x1234);
+        assert!(resp.data.is_empty());
+        assert!(resp.moved_handles.is_empty());
+    }
+
+    #[test]
+    fn test_response_with_data() {
+        let resp = HipcResponse::with_data(1, vec![10, 20, 30]);
+        assert_eq!(resp.result_code, 1);
+        assert_eq!(resp.data, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_response_to_bytes_minimal() {
+        // result_code=0, no data, no handles
+        let resp = HipcResponse::new(0);
+        let bytes = resp.to_bytes();
+
+        // Parse back to verify
+        let msg = HipcMessage::parse(&bytes, "ns").unwrap();
+        assert_eq!(msg.command_type, CommandType::Request);
+        assert_eq!(msg.method_id, 0); // result_code in raw data
+        assert_eq!(msg.raw_data.len(), 4);
+        // First u32 in raw data is the result_code
+        let result = u32::from_le_bytes(msg.raw_data[..4].try_into().unwrap());
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_response_to_bytes_with_data() {
+        let resp = HipcResponse::with_data(0xCAFE, vec![1, 2, 3, 4, 5]);
+        let bytes = resp.to_bytes();
+
+        // Parse back
+        let msg = HipcMessage::parse(&bytes, "ns").unwrap();
+        assert_eq!(msg.raw_data.len(), 8); // 4 (result_code) + 5 bytes padded to 8
+        let result = u32::from_le_bytes(msg.raw_data[..4].try_into().unwrap());
+        assert_eq!(result, 0xCAFE);
+        assert_eq!(&msg.raw_data[4..9], &[1, 2, 3, 4, 5]);
+        assert!(msg.move_handles.is_empty());
+    }
+
+    #[test]
+    fn test_response_to_bytes_with_handles() {
+        let resp = HipcResponse {
+            result_code: 0,
+            data: vec![],
+            moved_handles: vec![1, 2, 3],
+        };
+        let bytes = resp.to_bytes();
+
+        let msg = HipcMessage::parse(&bytes, "ns").unwrap();
+        assert_eq!(msg.move_handles.len(), 3);
+        assert_eq!(msg.move_handles[0].handle_id, 1);
+        assert!(msg.move_handles[0].is_move);
+        assert_eq!(msg.move_handles[1].handle_id, 2);
+        assert_eq!(msg.move_handles[2].handle_id, 3);
+    }
+
+    #[test]
+    fn test_response_to_bytes_with_data_and_handles() {
+        let resp = HipcResponse {
+            result_code: 0xABCD,
+            data: vec![0x10, 0x20],
+            moved_handles: vec![5, 9],
+        };
+        let bytes = resp.to_bytes();
+
+        let msg = HipcMessage::parse(&bytes, "ns").unwrap();
+        assert_eq!(msg.move_handles.len(), 2);
+        assert_eq!(msg.copy_handles.len(), 0);
+        assert_eq!(msg.move_handles[0].handle_id, 5);
+        assert_eq!(msg.move_handles[1].handle_id, 9);
+
+        let result = u32::from_le_bytes(msg.raw_data[..4].try_into().unwrap());
+        assert_eq!(result, 0xABCD);
+    }
+
+    #[test]
+    fn test_response_round_trip_full_flow() {
+        // Simulate a full request→dispatch→response→parse cycle
+        let mut router = HipcRouter::new();
+        router.register("set", 42, |data| {
+            let val = if data.len() >= 4 {
+                u32::from_le_bytes(data[..4].try_into().unwrap())
+            } else {
+                0
+            };
+            HipcResponse::with_data(val * 2, data.to_vec())
+        });
+
+        // Build a HIPC request message for set:42
+        let raw = [42u32, 0xDEADu32]; // method_id=42, payload=0xDEAD
+        let req_buf = build_request_msg(0, 0, 0, &raw);
+        let req = HipcMessage::parse(&req_buf, "set").unwrap();
+
+        assert_eq!(req.service_name, "set");
+        assert_eq!(req.method_id, 42);
+
+        // Dispatch
+        let resp = router.dispatch("set", req.method_id, &req.raw_data[4..]).unwrap();
+        assert_eq!(resp.result_code, 0xDEAD * 2);
+
+        // Convert to wire format
+        let resp_bytes = resp.to_bytes();
+
+        // Parse response
+        let parsed_resp = HipcMessage::parse(&resp_bytes, "set").unwrap();
+        let resp_result = u32::from_le_bytes(parsed_resp.raw_data[..4].try_into().unwrap());
+        assert_eq!(resp_result, 0xDEAD * 2);
+    }
+
+    // ── Negative Tests: malformed inputs ────────────────────────────────
+
+    #[test]
+    fn test_dispatch_empty_service_name() {
+        let mut router = HipcRouter::new();
+        router.register("ns", 0, handler_echo);
+        let result = router.dispatch("", 0, &[]);
+        assert!(matches!(result, Err(DispatchError::ServiceNotFound)));
+    }
+
+    #[test]
+    fn test_dispatch_method_id_beyond_255() {
+        let mut router = HipcRouter::new();
+        router.register("ns", 0, handler_echo);
+        // method_id=300 is beyond the 256-entry table → NotImplemented
+        let result = router.dispatch("ns", 300, &[]);
+        assert!(matches!(result, Err(DispatchError::NotImplemented)));
+    }
+
+    #[test]
+    fn test_dispatch_method_id_255_max() {
+        let mut router = HipcRouter::new();
+        router.register("ns", 255, handler_static_reply);
+        let resp = router.dispatch("ns", 255, &[]).unwrap();
+        assert_eq!(resp.result_code, 0x42);
+    }
+
+    #[test]
+    fn test_response_zero_length_data() {
+        let resp = HipcResponse::new(0x100);
+        let bytes = resp.to_bytes();
+        let msg = HipcMessage::parse(&bytes, "ns").unwrap();
+        // raw_data holds just the result_code word
+        assert_eq!(msg.raw_data.len(), 4);
+    }
+
+    #[test]
+    fn test_response_moved_handles_only_no_data() {
+        let resp = HipcResponse {
+            result_code: 0,
+            data: vec![],
+            moved_handles: vec![0xAABB],
+        };
+        let bytes = resp.to_bytes();
+        let msg = HipcMessage::parse(&bytes, "ns").unwrap();
+        assert_eq!(msg.move_handles.len(), 1);
+        assert_eq!(msg.move_handles[0].handle_id, 0xAABB);
+    }
+
+    #[test]
+    fn test_response_large_data_256_bytes() {
+        let resp = HipcResponse::with_data(0, vec![0x42; 256]);
+        let bytes = resp.to_bytes();
+        let msg = HipcMessage::parse(&bytes, "ns").unwrap();
+        // result_code + 256 bytes = 260 bytes → 65 words
+        assert_eq!(msg.raw_data.len(), 260);
+    }
+
+    #[test]
+    fn test_dispatch_error_display() {
+        assert!(format!("{}", DispatchError::ServiceNotFound).contains("not found"));
+        assert!(format!("{}", DispatchError::NotImplemented).contains("not implemented"));
+        assert!(format!("{}", DispatchError::MalformedMessage).contains("malformed"));
+    }
+
+    #[test]
+    fn test_service_dispatch_table_overwrite() {
+        let mut table = ServiceDispatchTable::new("test".into());
+        table.register(5, handler_echo);
+        assert_eq!(table.registered_count(), 1);
+        // Re-register same method_id
+        table.register(5, handler_static_reply);
+        assert_eq!(table.registered_count(), 1);
+        // Dispatch should use the second handler
+        let handler = table.dispatch(5).unwrap();
+        let resp = handler(&[]);
+        assert_eq!(resp.result_code, 0x42); // static_reply, not echo
+    }
+
+    #[test]
+    fn test_response_clone_eq() {
+        let r1 = HipcResponse::with_data(1, vec![2, 3]);
+        let r2 = r1.clone();
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn test_dispatch_error_clone_eq() {
+        let e1 = DispatchError::ServiceNotFound;
+        let e2 = e1.clone();
+        assert_eq!(e1, e2);
+    }
+
+    /// Stress: 1000 dispatches through router
+    #[test]
+    fn test_router_1000_dispatches() {
+        let mut router = HipcRouter::new();
+        for i in 0..256u32 {
+            router.register("stress", i, |data| {
+                HipcResponse::with_data(data.len() as u32, data.to_vec())
+            });
+        }
+        assert_eq!(router.total_handler_count(), 256);
+
+        for i in 0..1000u32 {
+            let method = i % 256;
+            let payload = vec![(method as u8); 8];
+            let resp = router.dispatch("stress", method, &payload).unwrap();
+            assert_eq!(resp.result_code, 8);
         }
     }
 }

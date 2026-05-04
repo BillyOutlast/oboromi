@@ -1,5 +1,6 @@
 use crate::nn;
 use crate::gpu;
+use crate::nn::hipc::HipcRouter;
 
 #[derive(Default)]
 pub struct Services {
