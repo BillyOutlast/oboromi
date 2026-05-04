@@ -7,6 +7,8 @@
 //! The fuse layout follows the Switchbrew / Atmosphère reference,
 //! mapped to community-documented values per D007.
 
+use log::warn;
+
 // ── Address constants ────────────────────────────────────────────
 
 /// eFuse MMIO base address (T210 TRM §35.3).
@@ -166,11 +168,72 @@ impl Default for EfuseArray {
     }
 }
 
+// ── MMIO trait implementation ─────────────────────────────────────
+
+impl crate::mmio::MmioDevice for EfuseArray {
+    /// Read `size` bytes from the eFuse array at the given byte `offset`.
+    ///
+    /// Handles all sizes (1/2/4/8) by reading underlying 32-bit words
+    /// and assembling the result in little-endian byte order.
+    /// For 8-byte reads, reads two consecutive words (offset+0, offset+4).
+    /// Returns 0 for unknown/unmapped offsets.
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        match size {
+            1 => {
+                let word_offset = offset & !3; // Round down to word boundary
+                let word = self.read_word(word_offset);
+                let byte_idx = (offset & 3) as usize;
+                ((word >> (byte_idx * 8)) & 0xFF) as u64
+            }
+            2 => {
+                // A 2-byte read can span two words if offset % 4 == 3.
+                let start_byte = (offset & 3) as usize;
+                if start_byte <= 2 {
+                    // Single-word case: bytes at [offset, offset+1] within one word
+                    let word_offset = offset & !3;
+                    let word = self.read_word(word_offset);
+                    ((word >> (start_byte * 8)) & 0xFFFF) as u64
+                } else {
+                    // Cross-word boundary: offset % 4 == 3
+                    // Low byte from word at (offset & !3), high byte from next word
+                    let word_lo = self.read_word(offset & !3);
+                    let word_hi = self.read_word((offset & !3) + 4);
+                    let lo_byte = (word_lo >> 24) & 0xFF;
+                    let hi_byte = word_hi & 0xFF;
+                    (lo_byte | (hi_byte << 8)) as u64
+                }
+            }
+            4 => {
+                self.read_word(offset) as u64
+            }
+            8 => {
+                let lo = self.read_word(offset) as u64;
+                let hi = self.read_word(offset + 4) as u64;
+                lo | (hi << 32)
+            }
+            _ => {
+                warn!("eFuse MMIO read with unsupported size={}", size);
+                0
+            }
+        }
+    }
+
+    /// Write to the eFuse array: **silently discarded**.
+    ///
+    /// Fuses are one-time programmable and already burned at boot.
+    /// This is correct hardware behavior — writes to OTP have no effect
+    /// after manufacturing.
+    fn write(&mut self, _offset: u64, _size: u32, _value: u64) {
+        // Silently discard: fuses are read-only post-manufacturing.
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mmio::MmioDevice;
 
     #[test]
     fn test_efuse_base_and_size() {
@@ -304,5 +367,116 @@ mod tests {
         for off in (0..EFUSE_SIZE).step_by(4) {
             assert_eq!(a.read_word(off), b.read_word(off));
         }
+    }
+
+    // ── MmioDevice trait tests ────────────────────────────────
+
+    #[test]
+    fn test_read_chip_id_via_mmio() {
+        let efuse = EfuseArray::new();
+        assert_eq!(efuse.read(0x000, 4), 0x0000_0035);
+    }
+
+    #[test]
+    fn test_read_vendor_code_via_mmio() {
+        let efuse = EfuseArray::new();
+        assert_eq!(efuse.read(0x004, 4), 0x4E56_4944);
+    }
+
+    #[test]
+    fn test_read_security_flags_via_mmio() {
+        let efuse = EfuseArray::new();
+        assert_eq!(efuse.read(FUSE_SECURITY_FLAGS, 4), 0x0000_0001);
+    }
+
+    #[test]
+    fn test_read_unmapped_offset() {
+        let efuse = EfuseArray::new();
+        // Offset 0x800 is beyond EFUSE_SIZE (0x400)
+        assert_eq!(efuse.read(0x800, 4), 0);
+        assert_eq!(efuse.read(0x800, 1), 0);
+        assert_eq!(efuse.read(0x800, 8), 0);
+    }
+
+    #[test]
+    fn test_read_sub_word_u8() {
+        let efuse = EfuseArray::new();
+        // Word 0 = 0x00000035. In LE bytes: [0x35, 0x00, 0x00, 0x00]
+        assert_eq!(efuse.read(0x000, 1), 0x35);
+        assert_eq!(efuse.read(0x001, 1), 0x00);
+        assert_eq!(efuse.read(0x002, 1), 0x00);
+        assert_eq!(efuse.read(0x003, 1), 0x00);
+
+        // Word at offset 4 = 0x4E564944. LE bytes: [0x44, 0x49, 0x56, 0x4E]
+        assert_eq!(efuse.read(0x004, 1), 0x44); // 'D'
+        assert_eq!(efuse.read(0x005, 1), 0x49); // 'I'
+        assert_eq!(efuse.read(0x006, 1), 0x56); // 'V'
+        assert_eq!(efuse.read(0x007, 1), 0x4E); // 'N'
+    }
+
+    #[test]
+    fn test_read_sub_word_u16() {
+        let efuse = EfuseArray::new();
+        // Word 0 = 0x00000035 → LE16 at offset 0 = 0x0035, at offset 2 = 0x0000
+        assert_eq!(efuse.read(0x000, 2), 0x0035);
+        assert_eq!(efuse.read(0x002, 2), 0x0000);
+
+        // Cross-word boundary: offset 3 → byte 3 of word 0 + byte 0 of word 1
+        // Word 0 = 0x00000035, word 1 = 0x4E564944
+        // Byte 3 of word 0 = 0x00, byte 0 of word 1 = 0x44
+        assert_eq!(efuse.read(0x003, 2), 0x4400);
+    }
+
+    #[test]
+    fn test_read_u64() {
+        let efuse = EfuseArray::new();
+        // Word 0 = 0x00000035 (lo), Word 1 = 0x4E564944 (hi)
+        let val = efuse.read(0x000, 8);
+        assert_eq!(val, 0x4E56_4944_0000_0035);
+    }
+
+    #[test]
+    fn test_read_u64_at_security_flags() {
+        let efuse = EfuseArray::new();
+        // FUSE_SECURITY_FLAGS = 0x108 → word = 0x00000001
+        // Next word (0x10C) = 0x00000000 (unused)
+        let val = efuse.read(FUSE_SECURITY_FLAGS, 8);
+        assert_eq!(val, 0x0000_0000_0000_0001);
+    }
+
+    #[test]
+    fn test_write_is_silently_ignored() {
+        let mut efuse = EfuseArray::new();
+
+        // Write to chip ID (offset 0), vendor code (offset 4)
+        efuse.write(0x000, 4, 0xDEAD_BEEF);
+        efuse.write(0x004, 4, 0x1234_5678);
+
+        // Read back — values must be unchanged
+        assert_eq!(efuse.read(0x000, 4), 0x0000_0035, "write must not change chip ID");
+        assert_eq!(efuse.read(0x004, 4), 0x4E56_4944, "write must not change vendor code");
+    }
+
+    #[test]
+    fn test_write_ignored_all_sizes() {
+        let mut efuse = EfuseArray::new();
+
+        efuse.write(0x000, 1, 0xFF);
+        efuse.write(0x000, 2, 0xFFFF);
+        efuse.write(0x000, 8, 0xFFFFFFFF_FFFFFFFF);
+
+        // All reads should still return the original chip ID
+        assert_eq!(efuse.read(0x000, 4), 0x0000_0035);
+    }
+
+    #[test]
+    fn test_read_all_zeros_initially() {
+        let efuse = EfuseArray::new();
+        // Unprogrammed regions should return 0
+        // Most of the 256-word array is zero beyond the documented regions
+        assert_eq!(efuse.read(0x040, 4), 0);
+        assert_eq!(efuse.read(0x0C0, 4), 0);
+        assert_eq!(efuse.read(0x1C4, 4), 0);
+        assert_eq!(efuse.read(0x240, 4), 0);
     }
 }
