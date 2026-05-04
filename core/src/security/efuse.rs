@@ -54,6 +54,7 @@ pub const FUSE_ANTI_ROLLBACK_BASE: u64 = 0x300;
 ///
 /// Initialized to community-documented reference values mirroring
 /// a production Switch with burned fuses (D007).
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct EfuseArray {
     /// Raw fuse word storage, indexed by byte offset / 4.
