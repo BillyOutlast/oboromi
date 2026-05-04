@@ -81,6 +81,13 @@ impl EfuseArray {
     /// - OEM vendor code: `"NXFF"` (0x4E584646)
     /// - Anti-rollback fuses: burned to version 15
     pub fn new() -> Self {
+        Self::new_t210()
+    }
+
+    /// Create a pre-populated T210 (Erista) fuse array with all community
+    /// reference values. This is the canonical constructor — `new()` delegates
+    /// to it. T239 uses the same fuse layout with different base addresses.
+    pub fn new_t210() -> Self {
         let mut words = [0u32; 256];
 
         // --- Reserved_SW (0x000–0x0FC) ---
