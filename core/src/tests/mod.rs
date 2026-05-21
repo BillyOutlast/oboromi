@@ -7,7 +7,9 @@ pub mod exception_test;
 pub mod gic_test;
 pub mod gic_e2e_test;
 pub mod efuse_test;
+pub mod bootrom_cpu_e2e_test;
 pub mod bootrom_integration_test;
+pub mod memory_map_test;
 pub mod nca_integration_test;
 
 pub use run::run_tests;

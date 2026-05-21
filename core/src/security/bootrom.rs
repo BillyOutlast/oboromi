@@ -17,7 +17,7 @@ use super::rsa::{RsaPublicKey, RsaVerifyError, sha256};
 pub const PACKAGE2_LOAD_ADDR: u64 = 0x4001_0000;
 const SIG_SIZE: usize = 256;
 const PK11_HEADER_SIZE: usize = 256;
-const MIN_FIRMWARE_SIZE: usize = SIG_SIZE + PK11_HEADER_SIZE + 1;
+pub const MIN_FIRMWARE_SIZE: usize = SIG_SIZE + PK11_HEADER_SIZE + 1;
 const PK11_MAGIC: u32 = 0x504B_3131;
 
 // Community-reference T210 RSA-2048 modulus (Atmosphère / fusee-gelee)

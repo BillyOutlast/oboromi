@@ -3,6 +3,8 @@ use log::info;
 use crate::cpu::UnicornCPU;
 use crate::mmio::gic::{GicDistributor, GicV3};
 use crate::mmio::MmioDevice;
+use crate::security::bootrom::{BootRom, BootResult, BootError};
+use crate::security::efuse::EfuseArray;
 use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -151,5 +153,28 @@ impl CpuManager {
     /// Get a reference to the shared GIC distributor, if registered.
     pub fn gic(&self) -> Option<&Rc<RefCell<GicDistributor>>> {
         self.gic_dist.as_ref()
+    }
+
+    /// Convenience method: run the BootROM on core 0.
+    ///
+    /// Creates a `BootRom` from `efuse` and dispatches `boot()` on core 0.
+    /// The caller is responsible for registering an eFuse MMIO device on the
+    /// bus (via `register_mmio_device`) if the firmware itself accesses eFuse
+    /// registers at `EFUSE_BASE`. For security-only tests (error-path
+    /// validation), bus registration is optional — `BootRom` only needs
+    /// the `EfuseArray` for key material, not for MMIO access.
+    ///
+    /// Returns `BootError::NoCpu` if core 0 is unavailable (should not happen
+    /// with the default 8-core CpuManager).
+    pub fn boot_rom(
+        &mut self,
+        efuse: &EfuseArray,
+        firmware: &[u8],
+    ) -> Result<BootResult, BootError> {
+        let bootrom = BootRom::new(efuse);
+        let core = self
+            .get_core_mut(0)
+            .ok_or(BootError::NoCpu)?;
+        bootrom.boot(core, firmware)
     }
 }
