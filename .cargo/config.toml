@@ -1,0 +1,6 @@
+# Append -latomic after all objects to resolve Unicorn Engine 2.x
+# __atomic_compare_exchange_16 / __atomic_load_16 / __atomic_store_16
+# on x86-64 Linux (GNU ld needs -latomic after the objects that reference it).
+# Scoped to Linux only: macOS has no libatomic and would fail.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-args=-latomic"]

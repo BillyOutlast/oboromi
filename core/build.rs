@@ -148,6 +148,8 @@ fn generate<W: std::fmt::Write>(w: &mut W, data: &str) -> Result<(), Box<dyn std
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/nn/auto.defs");
+    // Unicorn (QEMU) uses 128-bit atomics (__atomic_store_16) on x86_64 Linux
+    println!("cargo:rustc-link-lib=atomic");
 
     let data = std::fs::read_to_string("src/nn/auto.defs").unwrap_or_default();
     let mut w = String::new();

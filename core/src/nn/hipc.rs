@@ -423,6 +423,31 @@ impl HipcRouter {
         Ok(handler(data))
     }
 
+    /// Convenience: parse raw HIPC bytes and dispatch in one call.
+    ///
+    /// Extracts `method_id` from the first u32 of the message payload and
+    /// passes the remaining bytes to the registered handler. Returns
+    /// `MalformedMessage` if the input cannot be parsed.
+    pub fn dispatch_message(
+        &self,
+        data: &[u8],
+        service_name: &str,
+    ) -> Result<HipcResponse, DispatchError> {
+        let msg = HipcMessage::parse(data, service_name).map_err(|e| {
+            warn!(
+                "HipcRouter::dispatch_message: parse failed for '{}': {}",
+                service_name, e
+            );
+            DispatchError::MalformedMessage
+        })?;
+        let payload = if msg.raw_data.len() >= 4 {
+            &msg.raw_data[4..]
+        } else {
+            &[]
+        };
+        self.dispatch(&msg.service_name, msg.method_id, payload)
+    }
+
     pub fn registered_services(&self) -> Vec<String> {
         self.services.keys().cloned().collect()
     }

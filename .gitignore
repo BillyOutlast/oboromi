@@ -63,3 +63,5 @@ vendor/
 coverage/
 .cache/
 tmp/
+.agents/
+skills-lock.json

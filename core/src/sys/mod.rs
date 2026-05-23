@@ -1,6 +1,9 @@
 use crate::nn;
 use crate::gpu;
 use crate::nn::hipc::HipcRouter;
+use crate::cpu::cpu_manager::CpuManager;
+use crate::security::bootrom::{BootResult, BootError};
+use crate::security::efuse::EfuseArray;
 
 #[derive(Default)]
 pub struct Services {
@@ -164,20 +167,49 @@ pub struct Services {
     pub vic: Option<nn::vic::State>,
     pub wlan: Option<nn::wlan::State>,
     pub xcd: Option<nn::xcd::State>,
+    pub sm: Option<nn::sm::State>,
 }
 
 pub struct State {
     pub services: Services,
     pub gpu_state: gpu::State,
     pub hipc_router: HipcRouter,
+    pub cpu_manager: CpuManager,
 }
 
 impl State {
     pub fn new() -> Self {
+        let mut cpu_manager = CpuManager::new();
+        // Register GICv3 on all cores so interrupts work from boot.
+        cpu_manager.register_gic();
+
         Self {
             services: Services::default(),
             gpu_state: gpu::State::default(),
             hipc_router: HipcRouter::new(),
+            cpu_manager,
         }
+    }
+
+    /// Convenience: run the BootROM chain on core 0.
+    ///
+    /// Derives keys from `efuse`, creates a `BootRom`, and runs `boot()`
+    /// on core 0. This is the main entry point for tests that want to
+    /// validate the full secure boot chain.
+    pub fn boot_rom(&mut self, efuse: &EfuseArray, firmware: &[u8]) -> Result<BootResult, BootError> {
+        self.cpu_manager.boot_rom(efuse, firmware)
+    }
+
+    /// Convenience: run the BootROM chain on core 0 with a custom RSA key.
+    ///
+    /// Uses the provided `RsaPublicKey` instead of the hardcoded T210 key.
+    /// This lets tests sign firmware with a test keypair and verify it.
+    pub fn boot_rom_with_key(
+        &mut self,
+        efuse: &EfuseArray,
+        firmware: &[u8],
+        rsa_pub: &crate::security::rsa::RsaPublicKey,
+    ) -> Result<BootResult, BootError> {
+        self.cpu_manager.boot_rom_with_key(efuse, firmware, rsa_pub)
     }
 }

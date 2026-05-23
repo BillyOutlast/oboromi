@@ -11,6 +11,8 @@ pub mod bootrom_cpu_e2e_test;
 pub mod bootrom_integration_test;
 pub mod memory_map_test;
 pub mod nca_integration_test;
+pub mod hipc_sm_test;
+pub mod firmware_builder;
 
 pub use run::run_tests;
 pub use gpu_test::run_gpu_tests;

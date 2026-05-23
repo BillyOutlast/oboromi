@@ -3,6 +3,7 @@ use crate::sys;
 use crate::nn::hipc::HipcRouter;
 
 pub mod hipc;
+pub mod sm;
 
 macro_rules! define_service {
     ($($name:ident),* $(,)?) => {
@@ -223,4 +224,8 @@ pub fn start_host_services(state: &mut sys::State) {
     for (_name, run_fn) in entries.iter() {
         run_fn(state);
     }
+
+    // Wire sm service handlers into the HIPC router.
+    state.hipc_router.register("sm", 0, sm::handler_register_service);
+    state.hipc_router.register("sm", 1, sm::handler_get_service_handle);
 }

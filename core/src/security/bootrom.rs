@@ -9,16 +9,16 @@ use std::time::Instant;
 
 use log::{error, info, warn};
 
-use super::aes::{Aes128Key, aes_encrypt_block};
+use super::aes::{Aes128Key, aes_ctr_xor};
 use super::efuse::EfuseArray;
 use super::key_derivation::KeyDerivation;
-use super::rsa::{RsaPublicKey, RsaVerifyError, sha256};
+use super::rsa::{RsaPublicKey, RsaVerifyError};
 
 pub const PACKAGE2_LOAD_ADDR: u64 = 0x4001_0000;
-const SIG_SIZE: usize = 256;
-const PK11_HEADER_SIZE: usize = 256;
+pub const SIG_SIZE: usize = 256;
+pub const PK11_HEADER_SIZE: usize = 256;
 pub const MIN_FIRMWARE_SIZE: usize = SIG_SIZE + PK11_HEADER_SIZE + 1;
-const PK11_MAGIC: u32 = 0x504B_3131;
+pub const PK11_MAGIC: u32 = 0x504B_3131;
 
 // Community-reference T210 RSA-2048 modulus (Atmosphère / fusee-gelee)
 const T210_RSA_MODULUS: [u8; 256] = [
@@ -41,24 +41,6 @@ const T210_RSA_MODULUS: [u8; 256] = [
 ];
 const T210_RSA_EXPONENT: u32 = 65537;
 
-// ── AES-CTR (inlined — aes.rs doesn't export CTR mode) ────────────
-
-fn aes_ctr_xor(key: &Aes128Key, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    let block_count = (data.len() + 15) / 16;
-    let mut out = Vec::with_capacity(data.len());
-    for block_idx in 0..block_count {
-        let mut ctr = *iv;
-        let idx_bytes = (block_idx as u64).to_be_bytes();
-        for i in 0..8 { ctr[i] ^= idx_bytes[i]; }
-        let keystream = aes_encrypt_block(key, &ctr);
-        let data_offset = block_idx * 16;
-        let remaining = data.len() - data_offset;
-        let take = remaining.min(16);
-        for i in 0..take { out.push(data[data_offset + i] ^ keystream[i]); }
-    }
-    out
-}
-
 // ── PK11 header ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -70,6 +52,16 @@ pub struct Pk11Header {
 }
 
 impl Pk11Header {
+    /// Serialize this PK11 header to a 256-byte array.
+    pub fn serialize(&self) -> [u8; 256] {
+        let mut raw = [0u8; 256];
+        raw[0..4].copy_from_slice(&self.magic.to_le_bytes());
+        raw[4..8].copy_from_slice(&self.version.to_le_bytes());
+        raw[8..16].copy_from_slice(&self.package2_size.to_le_bytes());
+        raw[16..32].copy_from_slice(&self.ctr_iv);
+        raw
+    }
+
     pub fn parse(raw: &[u8; 256]) -> Result<Self, BootError> {
         let magic = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
         if magic != PK11_MAGIC {
@@ -275,6 +267,7 @@ impl fmt::Debug for BootRom {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::aes::aes_ctr_xor;
 
     #[test] fn pk11_parse_valid() {
         let mut raw = [0u8; 256];

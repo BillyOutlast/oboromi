@@ -5,6 +5,7 @@ use crate::mmio::gic::{GicDistributor, GicV3};
 use crate::mmio::MmioDevice;
 use crate::security::bootrom::{BootRom, BootResult, BootError};
 use crate::security::efuse::EfuseArray;
+use crate::security::rsa::RsaPublicKey;
 use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -172,6 +173,24 @@ impl CpuManager {
         firmware: &[u8],
     ) -> Result<BootResult, BootError> {
         let bootrom = BootRom::new(efuse);
+        let core = self
+            .get_core_mut(0)
+            .ok_or(BootError::NoCpu)?;
+        bootrom.boot(core, firmware)
+    }
+
+    /// Run the BootROM on core 0 with a custom RSA public key.
+    ///
+    /// This is the test-facing variant that accepts a custom `RsaPublicKey`
+    /// (e.g., from `generate_test_keypair()`). The caller signs firmware with
+    /// the matching private key so BootROM can verify it.
+    pub fn boot_rom_with_key(
+        &mut self,
+        efuse: &EfuseArray,
+        firmware: &[u8],
+        rsa_pub: &RsaPublicKey,
+    ) -> Result<BootResult, BootError> {
+        let bootrom = BootRom::with_rsa_key(efuse, rsa_pub.n_bytes(), rsa_pub.e_u32());
         let core = self
             .get_core_mut(0)
             .ok_or(BootError::NoCpu)?;

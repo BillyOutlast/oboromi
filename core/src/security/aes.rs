@@ -410,6 +410,31 @@ pub fn aes_cbc_decrypt(key: &Aes128Key, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
     out
 }
 
+// ── CTR mode ─────────────────────────────────────────────────────
+
+/// AES-CTR encrypt/decrypt (XOR with keystream).
+///
+/// CTR mode is the same for encrypt and decrypt: XOR plaintext/ciphertext
+/// with the AES-encrypted counter block. This function can be used for both.
+///
+/// The IV is used as the initial counter. For block i, the counter is
+/// `iv ^ block_index` (big-endian block index XORed into the low 8 bytes).
+pub fn aes_ctr_xor(key: &Aes128Key, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let block_count = (data.len() + 15) / 16;
+    let mut out = Vec::with_capacity(data.len());
+    for block_idx in 0..block_count {
+        let mut ctr = *iv;
+        let idx_bytes = (block_idx as u64).to_be_bytes();
+        for i in 0..8 { ctr[i] ^= idx_bytes[i]; }
+        let keystream = aes_encrypt_block(key, &ctr);
+        let data_offset = block_idx * 16;
+        let remaining = data.len() - data_offset;
+        let take = remaining.min(16);
+        for i in 0..take { out.push(data[data_offset + i] ^ keystream[i]); }
+    }
+    out
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
