@@ -1,3 +1,4 @@
+pub mod hfs0;
 pub mod pfs0;
 
 use memmap2::Mmap;
