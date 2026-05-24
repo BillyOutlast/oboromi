@@ -119,6 +119,78 @@ impl core::fmt::Debug for KeyDerivation {
     }
 }
 
+// ── KeySet ────────────────────────────────────────────────────────
+
+/// Convenience wrapper that eagerly derives SSK and Device Key from
+/// a Secure Boot Key (SBK). Exposes `device_key()` and a `derive_title_key()`
+/// method for NCA title key decryption.
+///
+/// KeySet is a simpler alternative to `KeyDerivation` for callers that
+/// only need the derived keys and title key decryption.
+pub struct KeySet {
+    /// Secure Storage Key — derived once at construction.
+    ssk: [u8; 16],
+    /// Device Key — derived once at construction.
+    device_key: [u8; 16],
+}
+
+impl KeySet {
+    /// Derive all keys from a raw 16-byte SBK.
+    ///
+    /// Performs SBK → SSK → Device Key using the same constants and
+    /// AES primitives as `KeyDerivation`.
+    pub fn from_sbk(sbk: &[u8; 16]) -> Self {
+        let sbk_expanded = Aes128Key::from_bytes(sbk);
+        let ssk = aes_encrypt_block(&sbk_expanded, &SSK_DERIVATION_CONSTANT);
+        let ssk_expanded = Aes128Key::from_bytes(&ssk);
+        let device_key = aes_encrypt_block(&ssk_expanded, &DEVICE_KEY_SOURCE);
+        info!("KeySet: derived SSK and Device Key from raw SBK");
+        Self { ssk, device_key }
+    }
+
+    /// Derive all keys from the eFuse array.
+    ///
+    /// Extracts the SBK from `PrivateKey0` (offset 0x1A4) and
+    /// performs the full derivation chain.
+    pub fn from_efuse(efuse: &EfuseArray) -> Self {
+        let fuse_bytes = efuse.as_bytes();
+        let mut sbk = [0u8; 16];
+        sbk.copy_from_slice(&fuse_bytes[0x1A4..0x1A4 + 16]);
+        info!("KeySet: loaded SBK from eFuse, derived SSK and Device Key");
+        Self::from_sbk(&sbk)
+    }
+
+    /// Return the derived Device Key (16 bytes).
+    pub fn device_key(&self) -> [u8; 16] {
+        self.device_key
+    }
+
+    /// Derive a title key by decrypting an NCA key area entry with the Device Key.
+    ///
+    /// Performs a single-block AES-ECB decrypt of `key_area_entry` using
+    /// the device key.
+    pub fn derive_title_key(&self, key_area_entry: &[u8; 16]) -> [u8; 16] {
+        let dk_expanded = Aes128Key::from_bytes(&self.device_key);
+        info!("KeySet: Device Key → Title Key (AES-ECB decrypt)");
+        aes_decrypt_block(&dk_expanded, key_area_entry)
+    }
+
+    /// Return the derived Secure Storage Key (16 bytes).
+    ///
+    /// Exposed for use cases that need the SSK directly (e.g., NCA header
+    /// key derivation in downstream tasks).
+    #[allow(dead_code)]
+    pub fn ssk(&self) -> [u8; 16] {
+        self.ssk
+    }
+}
+
+impl core::fmt::Debug for KeySet {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("KeySet").finish_non_exhaustive()
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 //
 // Test vectors are computed via the same AES engine from T01
@@ -342,5 +414,79 @@ mod tests {
         let s = format!("{:?}", kd);
         assert!(!s.contains("round_keys"));
         assert!(!s.contains("sbk"));
+    }
+
+    // ── KeySet tests ──────────────────────────────────────────────
+
+    #[test]
+    fn keyset_from_sbk_matches_key_derivation() {
+        let sbk = sbk_16();
+        let ks = KeySet::from_sbk(&sbk);
+        let efuse = EfuseArray::new();
+        let kd = KeyDerivation::from_efuse(&efuse);
+        let ssk_expected = kd.derive_ssk();
+        let dk_expected = kd.derive_device_key(&ssk_expected);
+        assert_eq!(ks.device_key(), dk_expected,
+            "KeySet device_key must match KeyDerivation");
+    }
+
+    #[test]
+    fn keyset_from_efuse_produces_same_as_from_sbk() {
+        let efuse = EfuseArray::new();
+        let ks_from_efuse = KeySet::from_efuse(&efuse);
+        let sbk = sbk_16();
+        let ks_from_sbk = KeySet::from_sbk(&sbk);
+        assert_eq!(ks_from_efuse.device_key(), ks_from_sbk.device_key());
+    }
+
+    #[test]
+    fn keyset_derive_title_key_roundtrip() {
+        let efuse = EfuseArray::new();
+        let ks = KeySet::from_efuse(&efuse);
+        let dk_expanded = Aes128Key::from_bytes(&ks.device_key());
+        let encrypted = aes_encrypt_block(&dk_expanded, &KNOWN_TITLE_KEY);
+        assert_eq!(ks.derive_title_key(&encrypted), KNOWN_TITLE_KEY);
+    }
+
+    #[test]
+    fn keyset_derive_title_key_matches_key_derivation() {
+        let efuse = EfuseArray::new();
+        let ks = KeySet::from_efuse(&efuse);
+        let kd = KeyDerivation::from_efuse(&efuse);
+        let ssk = kd.derive_ssk();
+        let dk = kd.derive_device_key(&ssk);
+        let dk_expanded = Aes128Key::from_bytes(&dk);
+        let encrypted = aes_encrypt_block(&dk_expanded, &KNOWN_TITLE_KEY);
+        assert_eq!(ks.derive_title_key(&encrypted), kd.decrypt_title_key(&dk, &encrypted));
+    }
+
+    #[test]
+    fn keyset_different_sbk_produces_different_device_key() {
+        let mut sbk2 = sbk_16();
+        sbk2[0] ^= 0x01;
+        let ks1 = KeySet::from_sbk(&sbk_16());
+        let ks2 = KeySet::from_sbk(&sbk2);
+        assert_ne!(ks1.device_key(), ks2.device_key());
+    }
+
+    #[test]
+    fn keyset_device_key_is_16_bytes() {
+        let ks = KeySet::from_sbk(&sbk_16());
+        assert_eq!(ks.device_key().len(), 16);
+    }
+
+    #[test]
+    fn keyset_device_key_not_all_zeros() {
+        let ks = KeySet::from_sbk(&sbk_16());
+        assert_ne!(ks.device_key(), [0u8; 16]);
+    }
+
+    #[test]
+    fn keyset_debug_does_not_leak_key() {
+        let ks = KeySet::from_sbk(&sbk_16());
+        let s = format!("{:?}", ks);
+        assert!(!s.contains("ssk"));
+        assert!(!s.contains("device_key"));
+        assert!(!s.contains("0x"));
     }
 }
