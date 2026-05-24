@@ -1,5 +1,7 @@
 pub mod hfs0;
+pub mod nsp;
 pub mod pfs0;
+pub mod xci;
 
 use memmap2::Mmap;
 use std::fs;
