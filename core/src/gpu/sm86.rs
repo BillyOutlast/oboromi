@@ -1189,25 +1189,55 @@ impl<'a> Decoder<'a> {
         todo!();
     }
     pub fn fadd(&mut self, inst: u128) {
-        let _pg = (((inst >> 12) & 0x7) << 0);
-        let _pg_not = (((inst >> 15) & 0x1) << 0);
-        let _rd = (((inst >> 16) & 0xff) << 0);
-        let _ra = (((inst >> 24) & 0xff) << 0);
-        let _sc_addr = (((inst >> 40) & 0x3fff) << 0);
-        let _sc_bank = (((inst >> 54) & 0x1f) << 0);
-        let _sc_absolute = (((inst >> 62) & 0x1) << 0);
-        let _sc_negate = (((inst >> 63) & 0x1) << 0);
-        let _e = (((inst >> 72) & 0x1) << 0);
-        let _sz = (((inst >> 73) & 0x1) << 0);
-        let _satfinite = (((inst >> 77) & 0x1) << 0);
+        let pg = (((inst >> 12) & 0x7) << 0) as u32;
+        let pg_not = (((inst >> 15) & 0x1) << 0) as u32;
+        let rd = (((inst >> 16) & 0xff) << 0) as u32;
+        let ra = (((inst >> 24) & 0xff) << 0) as u32;
+        let sc_addr = (((inst >> 40) & 0x3fff) << 0) as u32;
+        let sc_bank = (((inst >> 54) & 0x1f) << 0) as u32;
+        let sc_absolute = (((inst >> 62) & 0x1) << 0) as u32;
+        let sc_negate = (((inst >> 63) & 0x1) << 0) as u32;
+        let e = (((inst >> 72) & 0x1) << 0) as u32;
+        let sz = (((inst >> 73) & 0x1) << 0) as u32;
+        let satfinite = (((inst >> 77) & 0x1) << 0) as u32;
         let _stride = (((inst >> 78) & 0x3) << 0);
-        let _ftz = (((inst >> 80) & 0x1) << 0);
+        let ftz = (((inst >> 80) & 0x1) << 0) as u32;
         let _pm_pred = (((inst >> 102) & 0x3) << 0);
         let _dst_wr_sb = (((inst >> 110) & 0x7) << 0);
         let _src_rel_sb = (((inst >> 113) & 0x7) << 0);
         let _req_bit_set = (((inst >> 116) & 0x3f) << 0);
         let _opex = (((inst >> 122) & 0x7) << 5) | (((inst >> 105) & 0x1f) << 0);
-        todo!();
+
+        assert!(e == 0, "FADD: extended precision (64-bit) not implemented");
+        assert!(sz == 0, "FADD: 64-bit operand size not implemented");
+        assert!(satfinite == 0, "FADD: saturate not implemented");
+        assert!(ftz == 0, "FADD: denorm-flush (FTZ) not implemented");
+        assert!(sc_bank == 0, "FADD: constant bank != 0 not implemented");
+
+        let a_u32 = self.load_register(ra);
+        let a = self.ir.emit_bitcast(self.type_f32[1], a_u32);
+
+        // Compute immediate B from constant bank (sc_bank==0 → sc_addr is the literal)
+        let imm_val = sc_addr;
+        let b_u32 = self.cached_const_u32(imm_val);
+        let mut b = self.ir.emit_bitcast(self.type_f32[1], b_u32);
+
+        // Apply source modifiers to B operand: absolute, then negate
+        if sc_absolute != 0 {
+            // Float abs via bit manipulation: clear sign bit (no GLSL.std.450 dep)
+            let abs_mask = self.cached_const_u32(0x7fff_ffff);
+            let b_u = self.ir.emit_bitcast(self.type_u32[1], b);
+            let cleared = self.ir.emit_bitwise_and(self.type_u32[1], b_u, abs_mask);
+            b = self.ir.emit_bitcast(self.type_f32[1], cleared);
+        }
+        if sc_negate != 0 {
+            b = self.ir.emit_fnegate(self.type_f32[1], b);
+        }
+
+        let res_f32 = self.ir.emit_fadd(self.type_f32[1], a, b);
+        let res = self.ir.emit_bitcast(self.type_u32[1], res_f32);
+
+        self.store_register_predicated(rd, pg, pg_not != 0, res);
     }
     pub fn fadd32i(&mut self, inst: u128) {
         let _pg = (((inst >> 12) & 0x7) << 0);
@@ -1246,28 +1276,73 @@ impl<'a> Decoder<'a> {
         todo!();
     }
     pub fn ffma(&mut self, inst: u128) {
-        let _pg = (((inst >> 12) & 0x7) << 0);
-        let _pg_not = (((inst >> 15) & 0x1) << 0);
-        let _rd = (((inst >> 16) & 0xff) << 0);
-        let _ra = (((inst >> 24) & 0xff) << 0);
-        let _sc_addr = (((inst >> 40) & 0x3fff) << 0);
-        let _sc_bank = (((inst >> 54) & 0x1f) << 0);
-        let _sc_absolute = (((inst >> 62) & 0x1) << 0);
-        let _sc_negate = (((inst >> 63) & 0x1) << 0);
-        let _rc = (((inst >> 64) & 0xff) << 0);
-        let _e = (((inst >> 72) & 0x1) << 0);
-        let _sz = (((inst >> 73) & 0x1) << 0);
-        let _sc_absolute = (((inst >> 74) & 0x1) << 0);
-        let _sc_negate = (((inst >> 75) & 0x1) << 0);
-        let _satfinite = (((inst >> 77) & 0x1) << 0);
+        let pg = (((inst >> 12) & 0x7) << 0) as u32;
+        let pg_not = (((inst >> 15) & 0x1) << 0) as u32;
+        let rd = (((inst >> 16) & 0xff) << 0) as u32;
+        let ra = (((inst >> 24) & 0xff) << 0) as u32;
+        let sc_addr = (((inst >> 40) & 0x3fff) << 0) as u32;
+        let sc_bank = (((inst >> 54) & 0x1f) << 0) as u32;
+        let sc_abs_b = (((inst >> 62) & 0x1) << 0) as u32;
+        let sc_neg_b = (((inst >> 63) & 0x1) << 0) as u32;
+        let rc = (((inst >> 64) & 0xff) << 0) as u32;
+        let e = (((inst >> 72) & 0x1) << 0) as u32;
+        let sz = (((inst >> 73) & 0x1) << 0) as u32;
+        let sc_abs_c = (((inst >> 74) & 0x1) << 0) as u32;
+        let sc_neg_c = (((inst >> 75) & 0x1) << 0) as u32;
+        let satfinite = (((inst >> 77) & 0x1) << 0) as u32;
         let _stride = (((inst >> 78) & 0x3) << 0);
-        let _fmz = (((inst >> 80) & 0x1) << 1) | (((inst >> 76) & 0x1) << 0);
+        let fmz = (((inst >> 80) & 0x1) << 1) | (((inst >> 76) & 0x1) << 0);
         let _pm_pred = (((inst >> 102) & 0x3) << 0);
         let _dst_wr_sb = (((inst >> 110) & 0x7) << 0);
         let _src_rel_sb = (((inst >> 113) & 0x7) << 0);
         let _req_bit_set = (((inst >> 116) & 0x3f) << 0);
         let _opex = (((inst >> 122) & 0x7) << 5) | (((inst >> 105) & 0x1f) << 0);
-        todo!();
+
+        assert!(e == 0, "FFMA: extended precision (64-bit) not implemented");
+        assert!(sz == 0, "FFMA: 64-bit operand size not implemented");
+        assert!(satfinite == 0, "FFMA: saturate not implemented");
+        assert!(fmz == 0, "FFMA: FMAZ (fma-zero) not implemented");
+        assert!(sc_bank == 0, "FFMA: constant bank != 0 not implemented");
+
+        let a_u32 = self.load_register(ra);
+        let a = self.ir.emit_bitcast(self.type_f32[1], a_u32);
+
+        // Compute imm32 B from sc_addr
+        let imm_val = sc_addr;
+        let b_u32 = self.cached_const_u32(imm_val);
+        let mut b = self.ir.emit_bitcast(self.type_f32[1], b_u32);
+
+        // Apply source modifiers to B operand
+        if sc_abs_b != 0 {
+            let abs_mask = self.cached_const_u32(0x7fff_ffff);
+            let b_u = self.ir.emit_bitcast(self.type_u32[1], b);
+            let cleared = self.ir.emit_bitwise_and(self.type_u32[1], b_u, abs_mask);
+            b = self.ir.emit_bitcast(self.type_f32[1], cleared);
+        }
+        if sc_neg_b != 0 {
+            b = self.ir.emit_fnegate(self.type_f32[1], b);
+        }
+
+        // Load C register, apply modifiers
+        let c_u32 = self.load_register(rc);
+        let mut c = self.ir.emit_bitcast(self.type_f32[1], c_u32);
+
+        if sc_abs_c != 0 {
+            let abs_mask = self.cached_const_u32(0x7fff_ffff);
+            let c_u = self.ir.emit_bitcast(self.type_u32[1], c);
+            let cleared = self.ir.emit_bitwise_and(self.type_u32[1], c_u, abs_mask);
+            c = self.ir.emit_bitcast(self.type_f32[1], cleared);
+        }
+        if sc_neg_c != 0 {
+            c = self.ir.emit_fnegate(self.type_f32[1], c);
+        }
+
+        // rd = a * b + c  (fused multiply-add)
+        let product = self.ir.emit_fmul(self.type_f32[1], a, b);
+        let res_f32 = self.ir.emit_fadd(self.type_f32[1], product, c);
+        let res = self.ir.emit_bitcast(self.type_u32[1], res_f32);
+
+        self.store_register_predicated(rd, pg, pg_not != 0, res);
     }
     pub fn ffma32i(&mut self, inst: u128) {
         let _pg = (((inst >> 12) & 0x7) << 0);
