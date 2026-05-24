@@ -2202,25 +2202,46 @@ impl<'a> Decoder<'a> {
         todo!();
     }
     pub fn imad(&mut self, inst: u128) {
-        let _pg = (((inst >> 12) & 0x7) << 0);
-        let _pg_not = (((inst >> 15) & 0x1) << 0);
-        let _rd = (((inst >> 16) & 0xff) << 0);
-        let _ra = (((inst >> 24) & 0xff) << 0);
-        let _sc_addr = (((inst >> 40) & 0x3fff) << 0);
-        let _sc_bank = (((inst >> 54) & 0x1f) << 0);
-        let _rc = (((inst >> 64) & 0xff) << 0);
-        let _sz = (((inst >> 73) & 0x1) << 0);
-        let _sc_absolute = (((inst >> 74) & 0x1) << 0);
-        let _sc_negate = (((inst >> 75) & 0x1) << 0);
-        let _pu = (((inst >> 81) & 0x7) << 0);
-        let _pp = (((inst >> 87) & 0x7) << 0);
+        let pg = (((inst >> 12) & 0x7) << 0) as u32;
+        let pg_not = (((inst >> 15) & 0x1) << 0) as u32;
+        let rd = (((inst >> 16) & 0xff) << 0) as u32;
+        let ra = (((inst >> 24) & 0xff) << 0) as u32;
+        let sc_addr = (((inst >> 40) & 0x3fff) << 0) as u32;
+        let sc_bank = (((inst >> 54) & 0x1f) << 0) as u32;
+        let rc = (((inst >> 64) & 0xff) << 0) as u32;
+        let sz = (((inst >> 73) & 0x1) << 0) as u32;
+        let sc_absolute = (((inst >> 74) & 0x1) << 0) as u32;
+        let sc_negate = (((inst >> 75) & 0x1) << 0) as u32;
+        let pu = (((inst >> 81) & 0x7) << 0) as u32;
+        let cop = (((inst >> 84) & 0x7) << 0) as u32;
+        let pp = (((inst >> 87) & 0x7) << 0) as u32;
         let _input_reg_sz_32_dist = (((inst >> 90) & 0x1) << 0);
         let _pm_pred = (((inst >> 102) & 0x3) << 0);
         let _dst_wr_sb = (((inst >> 110) & 0x7) << 0);
         let _src_rel_sb = (((inst >> 113) & 0x7) << 0);
         let _req_bit_set = (((inst >> 116) & 0x3f) << 0);
         let _opex = (((inst >> 122) & 0x7) << 5) | (((inst >> 105) & 0x1f) << 0);
-        todo!();
+
+        assert!(sz == 0, "IMAD: 64-bit operand size not implemented");
+        assert!(sc_absolute == 0, "IMAD: sc_absolute source modifier not implemented");
+        assert!(sc_negate == 0, "IMAD: sc_negate source modifier not implemented");
+        assert!(sc_bank == 0, "IMAD: constant bank != 0 not implemented");
+
+        // rd = ra * imm32 + rc
+        let a = self.load_register(ra);
+        let b = self.cached_const_u32(sc_addr);
+        let c = self.load_register(rc);
+
+        let prod = self.ir.emit_imul(self.type_u32[1], a, b);
+        let res = self.ir.emit_iadd(self.type_u32[1], prod, c);
+
+        // handle comparison op
+        if cop != 0 {
+            let cmp_result = self.emit_cmp_against_zero(cop, res);
+            self.combine_and_set_predicate_bit(pu, pp, cmp_result);
+        }
+
+        self.store_register_predicated(rd, pg, pg_not != 0, res);
     }
     pub fn imma(&mut self, inst: u128) {
         let _pg = (((inst >> 12) & 0x7) << 0);
@@ -2708,23 +2729,66 @@ impl<'a> Decoder<'a> {
         todo!();
     }
     pub fn lop3(&mut self, inst: u128) {
-        let _pg = (((inst >> 12) & 0x7) << 0);
-        let _pg_not = (((inst >> 15) & 0x1) << 0);
-        let _rd = (((inst >> 16) & 0xff) << 0);
-        let _ra = (((inst >> 24) & 0xff) << 0);
-        let _ra_offset = (((inst >> 32) & 0xffffffff) << 0);
-        let _rc = (((inst >> 64) & 0xff) << 0);
-        let _imm8 = (((inst >> 72) & 0xff) << 0);
-        let _ftz = (((inst >> 80) & 0x1) << 0);
-        let _pu = (((inst >> 81) & 0x7) << 0);
-        let _pp = (((inst >> 87) & 0x7) << 0);
+        let pg = (((inst >> 12) & 0x7) << 0) as u32;
+        let pg_not = (((inst >> 15) & 0x1) << 0) as u32;
+        let rd = (((inst >> 16) & 0xff) << 0) as u32;
+        let ra = (((inst >> 24) & 0xff) << 0) as u32;
+        let ra_offset = (((inst >> 32) & 0xffffffff) << 0) as u32;
+        let rc = (((inst >> 64) & 0xff) << 0) as u32;
+        let imm8 = (((inst >> 72) & 0xff) << 0) as u32;
+        let ftz = (((inst >> 80) & 0x1) << 0) as u32;
+        let pu = (((inst >> 81) & 0x7) << 0) as u32;
+        let cop = (((inst >> 84) & 0x7) << 0) as u32;
+        let pp = (((inst >> 87) & 0x7) << 0) as u32;
         let _input_reg_sz_32_dist = (((inst >> 90) & 0x1) << 0);
         let _pm_pred = (((inst >> 102) & 0x3) << 0);
         let _dst_wr_sb = (((inst >> 110) & 0x7) << 0);
         let _src_rel_sb = (((inst >> 113) & 0x7) << 0);
         let _req_bit_set = (((inst >> 116) & 0x3f) << 0);
         let _opex = (((inst >> 122) & 0x7) << 5) | (((inst >> 105) & 0x1f) << 0);
-        todo!();
+
+        assert!(ftz == 0, "LOP3: denorm-flush (FTZ) not implemented");
+
+        // LOP3 applies an 8-bit truth table (imm8) to three 32-bit inputs bitwise.
+        // For each bit position, output = imm8[(a_bit) | (b_bit<<1) | (c_bit<<2)].
+        // We decompose into 8 mutually-exclusive minterms.
+        // Minterm i is active when imm8 bit i is 1:
+        //   if i&1 { a } else { ~a }  &  if i&2 { b } else { ~b }  &  if i&4 { c } else { ~c }
+        // Final result = OR of all active minterms.
+
+        let a = self.load_register(ra);
+        let b = self.cached_const_u32(ra_offset);
+        let c = self.load_register(rc);
+
+        // Pre-compute negated inputs
+        let not_a = self.ir.emit_not(self.type_u32[1], a);
+        let not_b = self.ir.emit_not(self.type_u32[1], b);
+        let not_c = self.ir.emit_not(self.type_u32[1], c);
+
+        // Accumulate active minterms; start with 0 (OR identity)
+        let mut result = self.const_u32_0;
+
+        for i in 0..8u32 {
+            if (imm8 >> i) & 1 == 0 {
+                continue;
+            }
+            // Build minterm: pick a or ~a, b or ~b, c or ~c based on bits of i
+            let a_sel = if i & 1 != 0 { a } else { not_a };
+            let b_sel = if i & 2 != 0 { b } else { not_b };
+            let c_sel = if i & 4 != 0 { c } else { not_c };
+
+            let ab = self.ir.emit_bitwise_and(self.type_u32[1], a_sel, b_sel);
+            let minterm = self.ir.emit_bitwise_and(self.type_u32[1], ab, c_sel);
+            result = self.ir.emit_bitwise_or(self.type_u32[1], result, minterm);
+        }
+
+        // handle comparison op
+        if cop != 0 {
+            let cmp_result = self.emit_cmp_against_zero(cop, result);
+            self.combine_and_set_predicate_bit(pu, pp, cmp_result);
+        }
+
+        self.store_register_predicated(rd, pg, pg_not != 0, result);
     }
     pub fn lop32i(&mut self, inst: u128) {
         let _pg = (((inst >> 12) & 0x7) << 0);
