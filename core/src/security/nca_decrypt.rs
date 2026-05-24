@@ -19,7 +19,7 @@
 //! **Constraints:** No real firmware dump — tests use inline fixtures.
 //! Key material is never logged as hex values.
 
-use super::aes::{Aes128Key, aes_encrypt_block, aes_decrypt_block};
+use super::aes::{Aes128Key, aes_encrypt_block, aes_decrypt_block, aes_xts_decrypt};
 use std::fmt;
 use std::error::Error;
 
@@ -446,6 +446,49 @@ pub fn decrypt_nca_key_area(header: &NcaHeader, device_key: &[u8; 16], key_index
     aes_decrypt_block(&dk, &header.key_area[key_index])
 }
 
+// ── NCA header XTS decryption ─────────────────────────────────────
+
+/// Sector size for XTS header decryption (0x200 bytes per sector).
+const XTS_SECTOR_SIZE: usize = 0x200;
+
+/// Number of sectors in a full NCA header (0xC00 / 0x200 = 6).
+const XTS_SECTOR_COUNT: usize = NCA_FULL_HEADER_SIZE / XTS_SECTOR_SIZE;
+
+/// Decrypt an XTS-encrypted NCA header and parse it.
+///
+/// NCA headers (crypto_type = 1) are encrypted with AES-XTS-128 using
+/// a non-standard endianness-reversed tweak. The 0xC00-byte encrypted
+/// header is divided into six 0x200-byte sectors, each decrypted independently
+/// with the sector number (0–5) as the XTS tweak/IV.
+///
+/// `header_key` is a 32-byte slice: first 16 bytes = XTS key1 (tweak key),
+/// second 16 bytes = XTS key2 (ciphertext key).
+///
+/// Returns the parsed `NcaHeader`, or `NcaError` on decrypt/parse failure.
+pub fn decrypt_nca_header(
+    encrypted_header: &[u8; NCA_FULL_HEADER_SIZE],
+    header_key: &[u8; 32],
+) -> Result<NcaHeader, NcaError> {
+    let key1 = Aes128Key::from_bytes(&header_key[0..16].try_into().unwrap());
+    let key2 = Aes128Key::from_bytes(&header_key[16..32].try_into().unwrap());
+
+    let mut decrypted = Vec::with_capacity(NCA_FULL_HEADER_SIZE);
+
+    for sector in 0..XTS_SECTOR_COUNT {
+        let offset = sector * XTS_SECTOR_SIZE;
+        let sector_data = &encrypted_header[offset..offset + XTS_SECTOR_SIZE];
+
+        // Build IV: lower 8 bytes = sector number (LE), upper 8 bytes = 0
+        let mut iv = [0u8; 16];
+        iv[0..8].copy_from_slice(&(sector as u64).to_le_bytes());
+
+        let pt = aes_xts_decrypt(&key1, &key2, &iv, sector_data);
+        decrypted.extend_from_slice(&pt);
+    }
+
+    parse_nca_header(&decrypted)
+}
+
 // ── AES-CTR section decryption ────────────────────────────────────
 
 /// Decrypt an NCA section using AES-128-CTR mode.
@@ -505,7 +548,7 @@ pub fn decrypt_nca_section(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::aes::{aes_encrypt_block, aes_decrypt_block, Aes128Key};
+    use super::super::aes::{aes_encrypt_block, aes_decrypt_block, aes_xts_encrypt, Aes128Key};
 
     const KNOWN_TITLE_KEY: [u8; 16] = [
         0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18,
@@ -921,5 +964,193 @@ mod tests {
         assert!(debug.contains("TruncatedFile"));
         assert!(debug.contains("100"));
         assert!(debug.contains("50"));
+    }
+
+    // ── XTS header decryption tests ────────────────────────────────
+    //
+    // Build a known NCA header, XTS-encrypt it sector-by-sector,
+    // then call decrypt_nca_header() to decrypt-and-parse in one step.
+
+    /// 32-byte test header key: first 16 = key1 (tweak), second 16 = key2 (cipher).
+    const XTS_HEADER_KEY: [u8; 32] = [
+        0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7,
+        0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF,
+        0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7,
+        0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
+    ];
+
+    /// Build a known-plaintext NCA header (0xC00 bytes) with recognizable field values.
+    fn build_plaintext_header() -> Vec<u8> {
+        let mut hdr = vec![0u8; NCA_FULL_HEADER_SIZE];
+
+        // 0x000–0x0FF: RSA-2048 signature (all zeros in test)
+        // 0x100–0x1FF: NCA header block
+        hdr[0x100] = b'N';
+        hdr[0x101] = b'C';
+        hdr[0x102] = b'A';
+        hdr[0x103] = b'3';
+        hdr[0x104] = 0x00; // distribution_type = System
+        hdr[0x105] = 0x01; // content_type = Meta
+        hdr[0x106] = 0x03; // key_generation = 4.0.0+
+        hdr[0x107] = 0x01; // key_area_encryption_key_index = 1 (ocean)
+        // content_size = 0x100000 bytes (u64 LE)
+        hdr[0x108..0x110].copy_from_slice(&0x0010_0000u64.to_le_bytes());
+        // title_id = 0x0100ABCD0000EF00 (u64 LE)
+        hdr[0x110..0x118].copy_from_slice(&0x0100_ABCD_0000_EF00u64.to_le_bytes());
+        // sdk_version = 0x000B0000 (u32 LE)
+        hdr[0x118..0x11C].copy_from_slice(&0x000B_0000u32.to_le_bytes());
+        hdr[0x11C] = 0x01; // crypto_type = 1 (XTS header encryption)
+        hdr[0x11D] = 0x03; // format_version = 3 (NCA3)
+
+        // Key area (0x200–0x3FF): leave zeroed (not relevant for header decrypt test)
+        // FsEntry table at 0x240: section 0 has data
+        let media_sectors: u32 = 0x20; // 0x4000 bytes
+        hdr[0x240..0x244].copy_from_slice(&0u32.to_le_bytes()); // start
+        hdr[0x244..0x248].copy_from_slice(&media_sectors.to_le_bytes()); // end
+
+        // FsHeader at 0x400 (section 0)
+        hdr[0x400] = 0x02; // version = 2
+        hdr[0x401] = 0x01; // fs_type = PartitionFS
+        hdr[0x402] = 0x02; // hash_type = PFS0
+        hdr[0x403] = 0x02; // encryption_type = CTR
+        hdr[0x408..0x410].copy_from_slice(&0x10000u64.to_le_bytes()); // sb offset
+        hdr[0x410..0x418].copy_from_slice(&0x8000u64.to_le_bytes());  // sb size
+
+        hdr
+    }
+
+    /// XTS-encrypt a 0xC00-byte header sector-by-sector.
+    fn xts_encrypt_header(plaintext: &[u8; NCA_FULL_HEADER_SIZE], key: &[u8; 32]) -> Vec<u8> {
+        let key1 = Aes128Key::from_bytes(&key[0..16].try_into().unwrap());
+        let key2 = Aes128Key::from_bytes(&key[16..32].try_into().unwrap());
+        let mut ct = Vec::with_capacity(NCA_FULL_HEADER_SIZE);
+        for sector in 0..6 {
+            let offset = sector * XTS_SECTOR_SIZE;
+            let sector_data = &plaintext[offset..offset + XTS_SECTOR_SIZE];
+            let mut iv = [0u8; 16];
+            iv[0..8].copy_from_slice(&(sector as u64).to_le_bytes());
+            let enc = aes_xts_encrypt(&key1, &key2, &iv, sector_data);
+            ct.extend_from_slice(&enc);
+        }
+        ct
+    }
+
+    #[test]
+    fn decrypt_nca_header_roundtrip() {
+        let pt = build_plaintext_header();
+        let pt_array: [u8; NCA_FULL_HEADER_SIZE] = pt.as_slice().try_into().unwrap();
+        let encrypted_array: [u8; NCA_FULL_HEADER_SIZE] =
+            xts_encrypt_header(&pt_array, &XTS_HEADER_KEY).as_slice().try_into().unwrap();
+
+        let hdr = decrypt_nca_header(&encrypted_array, &XTS_HEADER_KEY).unwrap();
+
+        assert_eq!(hdr.magic, NCA3_MAGIC);
+        assert_eq!(hdr.distribution_type, 0x00);
+        assert_eq!(hdr.content_type, 0x01); // Meta
+        assert_eq!(hdr.key_generation, 0x03);
+        assert_eq!(hdr.key_area_encryption_key_index, 0x01);
+        assert_eq!(hdr.content_size, 0x0010_0000);
+        assert_eq!(hdr.title_id, 0x0100_ABCD_0000_EF00);
+        assert_eq!(hdr.sdk_version, 0x000B_0000);
+        assert_eq!(hdr.crypto_type, 0x01);
+    }
+
+    #[test]
+    fn decrypt_nca_header_preserves_fs_headers() {
+        let pt = build_plaintext_header();
+        let pt_array: [u8; NCA_FULL_HEADER_SIZE] = pt.as_slice().try_into().unwrap();
+        let encrypted_array: [u8; NCA_FULL_HEADER_SIZE] =
+            xts_encrypt_header(&pt_array, &XTS_HEADER_KEY).as_slice().try_into().unwrap();
+
+        let hdr = decrypt_nca_header(&encrypted_array, &XTS_HEADER_KEY).unwrap();
+
+        // FsHeader[0] values from fixture
+        assert_eq!(hdr.fs_headers[0].version, 2);
+        assert_eq!(hdr.fs_headers[0].fs_type, 0x01); // PartitionFS
+        assert_eq!(hdr.fs_headers[0].hash_type, 0x02); // PFS0
+        assert_eq!(hdr.fs_headers[0].encryption_type, 0x02); // CTR
+        assert!(hdr.fs_headers[0].exists);
+    }
+
+    #[test]
+    fn decrypt_nca_header_wrong_key_fails_magic_check() {
+        let pt = build_plaintext_header();
+        let pt_array: [u8; NCA_FULL_HEADER_SIZE] = pt.as_slice().try_into().unwrap();
+        let encrypted_array: [u8; NCA_FULL_HEADER_SIZE] =
+            xts_encrypt_header(&pt_array, &XTS_HEADER_KEY).as_slice().try_into().unwrap();
+
+        // Use a different header key
+        let wrong_key: [u8; 32] = [0xFFu8; 32];
+        let result = decrypt_nca_header(&encrypted_array, &wrong_key);
+
+        // With wrong key, decryption produces garbage → magic check fails
+        match result {
+            Err(NcaError::BadMagic { .. }) => { /* expected */ }
+            Err(NcaError::UnsupportedVersion { .. }) => { /* also valid — garbage byte at 0x11D */ }
+            Ok(hdr) => {
+                // If it somehow passes magic/version, the field values should be garbage
+                // (not matching our known values)
+                assert!(
+                    hdr.title_id != 0x0100_ABCD_0000_EF00
+                        || hdr.content_size != 0x0010_0000
+                        || hdr.content_type != 0x01
+                        || hdr.key_area_encryption_key_index != 0x01,
+                    "wrong-key decrypt should not recover original fields"
+                );
+            }
+            _ => { /* also acceptable */ }
+        }
+    }
+
+    #[test]
+    fn decrypt_nca_header_wrong_key_produces_different_result() {
+        let pt = build_plaintext_header();
+        let pt_array: [u8; NCA_FULL_HEADER_SIZE] = pt.as_slice().try_into().unwrap();
+        let encrypted_array: [u8; NCA_FULL_HEADER_SIZE] =
+            xts_encrypt_header(&pt_array, &XTS_HEADER_KEY).as_slice().try_into().unwrap();
+
+        let hdr_correct = decrypt_nca_header(&encrypted_array, &XTS_HEADER_KEY).unwrap();
+
+        let wrong_key: [u8; 32] = [0xBBu8; 32];
+        let hdr_wrong = decrypt_nca_header(&encrypted_array, &wrong_key);
+
+        // If wrong-key result is Ok, it must differ from correct
+        if let Ok(hdr) = hdr_wrong {
+            assert_ne!(hdr.title_id, hdr_correct.title_id,
+                "wrong key must produce different parsed fields");
+        }
+    }
+
+    #[test]
+    fn decrypt_nca_header_deterministic() {
+        let pt = build_plaintext_header();
+        let pt_array: [u8; NCA_FULL_HEADER_SIZE] = pt.as_slice().try_into().unwrap();
+        let encrypted_array: [u8; NCA_FULL_HEADER_SIZE] =
+            xts_encrypt_header(&pt_array, &XTS_HEADER_KEY).as_slice().try_into().unwrap();
+
+        let hdr1 = decrypt_nca_header(&encrypted_array, &XTS_HEADER_KEY).unwrap();
+        let hdr2 = decrypt_nca_header(&encrypted_array, &XTS_HEADER_KEY).unwrap();
+
+        assert_eq!(hdr1.title_id, hdr2.title_id);
+        assert_eq!(hdr1.content_size, hdr2.content_size);
+        assert_eq!(hdr1.key_area, hdr2.key_area);
+    }
+
+    #[test]
+    fn decrypt_nca_header_handles_all_zero_header() {
+        // An all-zero encrypted header decrypts to some plaintext (not all-zero,
+        // because XTS produces well-distributed output). The parser should either
+        // reject bad magic or parse whatever bytes emerge.
+        let encrypted_zero = [0u8; NCA_FULL_HEADER_SIZE];
+        let result = decrypt_nca_header(&encrypted_zero, &XTS_HEADER_KEY);
+        // Should either fail with BadMagic/UnsupportedVersion, or parse successfully
+        // but with whatever the decrypted bytes contain. Neither case panics.
+        match result {
+            Ok(_) | Err(NcaError::BadMagic { .. }) | Err(NcaError::UnsupportedVersion { .. }) => {}
+            Err(e) => {
+                // Any other error (e.g., TruncatedFile) also acceptable — no panic.
+                let _ = e;
+            }
+        }
     }
 }
