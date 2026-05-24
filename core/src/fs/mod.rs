@@ -1,3 +1,5 @@
+pub mod pfs0;
+
 use memmap2::Mmap;
 use std::fs;
 use std::path::Path;
