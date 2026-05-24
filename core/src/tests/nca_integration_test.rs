@@ -65,19 +65,34 @@ fn build_nca_fixture(device_key: &[u8; 16]) -> (Vec<u8>, Vec<u8>, u64) {
     // ── Build full NCA header ─────────────────────────────────
     let mut header = vec![0u8; NCA_FULL_HEADER_SIZE];
 
-    header[0x100] = 0x00; // distribution_type = System
-    header[0x101] = 0x00; // content_type = Program
-    header[0x102] = 0x02; // key_generation = 3.0.0+
-    header[0x103] = 0x00; // fixed_key_index = 0 (application)
+    header[0x100] = b'N'; // magic[0]
+    header[0x101] = b'C'; // magic[1]
+    header[0x102] = b'A'; // magic[2]
+    header[0x103] = b'3'; // magic[3]
+    header[0x104] = 0x00; // distribution_type = System
+    header[0x105] = 0x00; // content_type = Program
+    header[0x106] = 0x02; // key_generation = 3.0.0+
+    header[0x107] = 0x00; // key_area_encryption_key_index = 0 (application)
+    header[0x108..0x110].copy_from_slice(&0u64.to_le_bytes()); // content_size
+    header[0x110..0x118].copy_from_slice(&0x0100_0000_0000_0000u64.to_le_bytes()); // title_id
+    header[0x118..0x11C].copy_from_slice(&0x0000_0004u32.to_le_bytes()); // sdk_version
+    header[0x11C] = 0x00; // crypto_type
+    header[0x11D] = 0x03; // format_version = 3 (NCA3)
 
     // Key area: entry 0, block 0 = encrypted title key
     header[0x200..0x210].copy_from_slice(&encrypted_title_key);
 
-    // Section table entry 0
-    header[0x400..0x404].copy_from_slice(&media_sectors.to_le_bytes());
-    header[0x404..0x408].copy_from_slice(&(media_sectors + media_sectors).to_le_bytes());
-    header[0x410..0x414].copy_from_slice(&file_offset.to_le_bytes());
-    header[0x414..0x418].copy_from_slice(&(file_offset + section_size).to_le_bytes());
+    // FsEntry table at 0x240
+    header[0x240..0x244].copy_from_slice(&media_sectors.to_le_bytes());
+    header[0x244..0x248].copy_from_slice(&(media_sectors + media_sectors).to_le_bytes());
+
+    // FsHeader at 0x400 (section 0)
+    header[0x400] = 0x02; // version = 2
+    header[0x401] = 0x00; // fs_type = RomFS
+    header[0x402] = 0x03; // hash_type
+    header[0x403] = 0x02; // encryption_type = CTR
+    header[0x408..0x410].copy_from_slice(&(file_offset as u64).to_le_bytes());
+    header[0x410..0x418].copy_from_slice(&(section_size as u64).to_le_bytes());
 
     (header, section_ciphertext, section_ctr)
 }
@@ -103,8 +118,8 @@ fn test_full_efuse_to_nca_section() {
     let (nca_header_bytes, section_ct, section_ctr) = build_nca_fixture(&device_key);
 
     // 5. Parse NCA header.
-    let nca_hdr = parse_nca_header(&nca_header_bytes);
-    assert_eq!(nca_hdr.sections.len(), NCA_SECTION_COUNT);
+    let nca_hdr = parse_nca_header(&nca_header_bytes).unwrap();
+    assert_eq!(nca_hdr.fs_entries.len(), NCA_SECTION_COUNT);
 
     // 6. Decrypt title key from NCA key area.
     let title_key = decrypt_nca_key_area(&nca_hdr, &device_key, 0);
@@ -145,7 +160,7 @@ fn test_wrong_device_key_does_not_decrypt_title_key() {
     let device_key = kd.derive_device_key(&ssk);
 
     let (nca_header_bytes, _section_ct, _section_ctr) = build_nca_fixture(&device_key);
-    let nca_hdr = parse_nca_header(&nca_header_bytes);
+    let nca_hdr = parse_nca_header(&nca_header_bytes).unwrap();
 
     // Use the wrong device key
     let wrong_dk = [0xFFu8; 16];
@@ -162,7 +177,7 @@ fn test_wrong_title_key_does_not_decrypt_section() {
     let device_key = kd.derive_device_key(&ssk);
 
     let (nca_header_bytes, section_ct, section_ctr) = build_nca_fixture(&device_key);
-    let nca_hdr = parse_nca_header(&nca_header_bytes);
+    let nca_hdr = parse_nca_header(&nca_header_bytes).unwrap();
     let title_key = decrypt_nca_key_area(&nca_hdr, &device_key, 0);
 
     // Decrypt with a different title key
@@ -182,10 +197,10 @@ fn test_nca_header_parsing_preserves_metadata() {
     let device_key = kd.derive_device_key(&ssk);
 
     let (nca_header_bytes, _section_ct, _section_ctr) = build_nca_fixture(&device_key);
-    let hdr = parse_nca_header(&nca_header_bytes);
+    let hdr = parse_nca_header(&nca_header_bytes).unwrap();
 
     assert_eq!(hdr.distribution_type, 0x00);
     assert_eq!(hdr.key_generation, 0x02);
-    assert_eq!(hdr.fixed_key_index, 0x00);
-    assert!(hdr.sections[0].exists, "section 0 must exist in the fixture");
+    assert_eq!(hdr.key_area_encryption_key_index, 0x00);
+    assert!(hdr.fs_headers[0].exists, "section 0 must exist in the fixture");
 }
