@@ -14,6 +14,7 @@ pub mod nca_integration_test;
 pub mod hipc_sm_test;
 pub mod firmware_builder;
 pub mod s05_boot_hipc_e2e_test;
+pub mod s05_gpu_pipeline_e2e_test;
 
 pub use run::run_tests;
 pub use gpu_test::run_gpu_tests;
